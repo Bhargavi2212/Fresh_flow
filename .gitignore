@@ -24,3 +24,8 @@ cursorrules
 **/agent-transcripts/
 **/mcps/
 **/terminals/
+
+# Project specs and docs (keep local only)
+PHASE_*_SPEC.md
+PROJECT.md
+docs/
