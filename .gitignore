@@ -28,4 +28,6 @@ cursorrules
 # Project specs and docs (keep local only)
 PHASE_*_SPEC.md
 PROJECT.md
+CUSTOMER_PORTAL_SPEC.md
 docs/
+scripts/setup-aws-bedrock-iam*

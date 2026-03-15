@@ -89,7 +89,7 @@ def parse_agent_json_with_retry(
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            result = agent.invoke(prompt)
+            result = agent(prompt)
             text = _extract_text_from_agent_result(result)
             return parse_agent_json(text, expected_keys, agent_name)
         except ValueError as e:
