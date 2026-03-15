@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
+
+# Cursor / plans / project metadata (do not push)
+.cursor/
+.cursorrules
+cursorrules
+*.plan.md
+**/plans/
+**/agent-transcripts/
+**/mcps/
+**/terminals/

@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+asyncpg
+sqlalchemy[asyncio]
+pgvector
+boto3
+pydantic
+pydantic-settings
+python-dotenv
+twilio
+strands-agents
+strands-agents-tools
