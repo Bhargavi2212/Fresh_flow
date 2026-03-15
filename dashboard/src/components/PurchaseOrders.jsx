@@ -73,20 +73,30 @@ export default function PurchaseOrders({ purchaseOrders, wsEvents, apiUrl }) {
                 )}
                 <span className="ml-auto text-gray-400">{expandedId === po.po_id ? '▼' : '▶'}</span>
               </button>
-              {expandedId === po.po_id && (detail[po.po_id]?.items?.length > 0 || po.items?.length > 0) && (
-                <div className="mt-2 pt-2 border-t border-gray-100 text-sm">
-                  <span className="font-medium text-gray-600">Line items:</span>
-                  <ul className="mt-1 space-y-0.5">
-                    {(detail[po.po_id]?.items ?? po.items ?? []).map((it, i) => (
-                      <li key={i} className="flex gap-2">
-                        <span className="font-mono">{it.sku_id}</span>
-                        <span>×{Number(it.quantity)}</span>
-                        {it.line_total != null && (
-                          <span className="text-gray-500">${Number(it.line_total).toFixed(2)}</span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
+              {expandedId === po.po_id && (
+                <div className="mt-2 pt-2 border-t border-gray-100 text-sm space-y-2">
+                  {(detail[po.po_id]?.reasoning ?? po.reasoning) && (
+                    <p className="text-gray-600 italic">
+                      <span className="font-medium text-gray-700">Reasoning: </span>
+                      {detail[po.po_id]?.reasoning ?? po.reasoning}
+                    </p>
+                  )}
+                  {(detail[po.po_id]?.items?.length > 0 || po.items?.length > 0) && (
+                    <>
+                      <span className="font-medium text-gray-600">Line items:</span>
+                      <ul className="mt-1 space-y-0.5">
+                        {(detail[po.po_id]?.items ?? po.items ?? []).map((it, i) => (
+                          <li key={i} className="flex gap-2">
+                            <span className="font-mono">{it.sku_id}</span>
+                            <span>×{Number(it.quantity)}</span>
+                            {it.line_total != null && (
+                              <span className="text-gray-500">${Number(it.line_total).toFixed(2)}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
                 </div>
               )}
             </li>

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     aws_default_region: str = "us-east-1"
+    # Optional Bedrock Guardrail (block off-topic, redact PII). Create in console or boto3.
+    bedrock_guardrail_id: str = ""
+    bedrock_guardrail_version: str = ""
 
     # Database
     database_url: str = "postgresql://postgres:postgres@localhost:5432/freshflow"

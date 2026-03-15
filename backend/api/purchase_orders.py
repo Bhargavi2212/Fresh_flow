@@ -64,7 +64,7 @@ async def list_purchase_orders(
 async def get_purchase_order(po_id: str):
     """Get one purchase order with line items and triggering order_id."""
     row = await fetch_one(
-        """SELECT po.po_id, po.supplier_id, po.status, po.total_amount, po.triggered_by, po.created_at, s.name AS supplier_name
+        """SELECT po.po_id, po.supplier_id, po.status, po.total_amount, po.triggered_by, po.reasoning, po.created_at, s.name AS supplier_name
            FROM purchase_orders po
            LEFT JOIN suppliers s ON s.supplier_id = po.supplier_id
            WHERE po.po_id = $1""",
@@ -93,6 +93,7 @@ async def get_purchase_order(po_id: str):
         status=row["status"],
         total_amount=row["total_amount"],
         triggered_by=row["triggered_by"],
+        reasoning=row.get("reasoning"),
         created_at=row["created_at"],
         items=items,
         supplier_name=row["supplier_name"],

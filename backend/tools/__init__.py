@@ -1,6 +1,6 @@
 # Re-export all @tool functions for agents and ingest.
 from backend.tools.product_search import search_products
-from backend.tools.customer_lookup import get_customer_history, get_customer_preferences
+from backend.tools.customer_lookup import get_customer_history, get_customer_preferences, get_usual_order
 from backend.tools.inventory_check import check_stock, get_expiring_items
 from backend.tools.substitutions import find_substitutions
 from backend.tools.supplier_lookup import get_suppliers_for_product
@@ -11,6 +11,7 @@ __all__ = [
     "search_products",
     "get_customer_history",
     "get_customer_preferences",
+    "get_usual_order",
     "check_stock",
     "get_expiring_items",
     "find_substitutions",

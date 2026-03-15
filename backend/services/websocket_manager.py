@@ -65,3 +65,14 @@ class ConnectionManager:
         except Exception as e:
             logger.warning("WebSocket broadcast_sync failed: %s", e)
             return
+
+
+_manager: ConnectionManager | None = None
+
+
+def get_ws_manager() -> ConnectionManager:
+    """Return the singleton connection manager."""
+    global _manager
+    if _manager is None:
+        _manager = ConnectionManager()
+    return _manager

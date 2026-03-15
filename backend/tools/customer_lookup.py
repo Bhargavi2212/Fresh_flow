@@ -2,6 +2,7 @@
 import json
 from collections import Counter
 from decimal import Decimal
+from statistics import median
 from typing import Any
 
 from strands import tool
@@ -141,3 +142,64 @@ def get_customer_preferences(customer_id: str) -> str:
         for r in prefs
     ]
     return json.dumps(_serialize({"profile": profile, "preferences": preferences}))
+
+
+@tool
+def get_usual_order(customer_id: str) -> str:
+    """
+    Get the customer's "usual" order: items that appear in 40%+ of their orders over the last 90 days,
+    with median quantity per item. Use when the customer says "the usual" or "my regular order".
+    Return items sorted by frequency (most often ordered first). Use these items directly with confidence 0.95.
+
+    Args:
+        customer_id: The customer's ID.
+
+    Returns:
+        JSON string with: items (list of {sku_id, product_name, median_quantity, order_count, frequency_pct}),
+        total_orders_in_window (number of orders in last 90 days).
+    """
+    orders = fetch_all_sync(
+        """SELECT order_id FROM orders
+           WHERE customer_id = $1 AND created_at >= (CURRENT_DATE - INTERVAL '90 days')
+           ORDER BY created_at DESC""",
+        customer_id,
+    )
+    total_orders = len(orders)
+    if total_orders == 0:
+        return json.dumps({"items": [], "total_orders_in_window": 0})
+
+    # sku_id -> list of quantities (one per order where this sku appeared)
+    sku_quantities: dict[str, list[float]] = {}
+    for o in orders:
+        items = fetch_all_sync(
+            """SELECT oi.sku_id, oi.quantity FROM order_items oi WHERE oi.order_id = $1""",
+            o["order_id"],
+        )
+        for r in items:
+            sku = r["sku_id"]
+            qty = float(r["quantity"]) if r["quantity"] else 0
+            if sku not in sku_quantities:
+                sku_quantities[sku] = []
+            sku_quantities[sku].append(qty)
+
+    # Include only items in >= 40% of orders; median quantity; sort by frequency desc
+    threshold = max(1, int(0.4 * total_orders))
+    result_items = []
+    for sku_id, quantities in sku_quantities.items():
+        order_count = len(quantities)
+        if order_count < threshold:
+            continue
+        med_qty = median(quantities)
+        name_row = fetch_one_sync("SELECT name FROM products WHERE sku_id = $1", sku_id)
+        product_name = name_row["name"] if name_row else sku_id
+        result_items.append({
+            "sku_id": sku_id,
+            "product_name": product_name,
+            "median_quantity": round(med_qty, 2),
+            "order_count": order_count,
+            "frequency_pct": round(100.0 * order_count / total_orders, 1),
+        })
+    result_items.sort(key=lambda x: x["order_count"], reverse=True)
+
+    out = {"items": result_items, "total_orders_in_window": total_orders}
+    return json.dumps(_serialize(out))

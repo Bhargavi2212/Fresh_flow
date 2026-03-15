@@ -47,6 +47,17 @@ export default function OrderDetail({ order, itemCount, totalAmount }) {
           </ul>
         </div>
       )}
+      {trace?.token_usage?.cost_estimate_usd != null && (
+        <div>
+          <span className="font-medium text-gray-600">Processing cost:</span>
+          <span className="ml-1 font-mono">${Number(trace.token_usage.cost_estimate_usd).toFixed(4)}</span>
+          {trace.token_usage.total_input_tokens != null && (
+            <span className="ml-2 text-gray-500 text-xs">
+              ({trace.token_usage.total_input_tokens} in / {trace.token_usage.total_output_tokens} out tokens)
+            </span>
+          )}
+        </div>
+      )}
       {Object.keys(trace).length > 0 && (
         <div>
           <span className="font-medium text-gray-600">Agent trace:</span>

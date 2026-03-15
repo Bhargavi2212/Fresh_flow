@@ -1,5 +1,7 @@
 """POST /api/ingest/web and POST /api/ingest/sms — raw order → Orchestrator pipeline."""
 import asyncio
+import time
+from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -9,12 +11,33 @@ from backend.agents.orchestrator import run_orchestrator
 from backend.api.schemas import IngestWebRequest, IngestWebResponse
 from backend.config import get_settings
 from backend.services.database import fetch_one
+from backend.services.input_sanitizer import sanitize_order_input
 from backend.services.websocket_manager import get_ws_manager
 
 router = APIRouter(prefix="/api/ingest", tags=["ingest"])
 
 # TwiML wording (spec-exact)
 TWIML_UNKNOWN_NUMBER = "Hi! We don't recognize this number. Please contact your sales rep to get set up."
+SMS_RATE_LIMIT_MESSAGE = "Too many orders from this number. Please try again later."
+
+# SMS rate limit: per phone, count orders in last hour; max 10
+_sms_order_times: dict[str, deque] = {}
+_SMS_MAX_PER_HOUR = 10
+_HOUR_SECS = 3600
+
+
+def _sms_rate_limit_check(phone: str) -> bool:
+    """Return True if under limit, False if over (should reject)."""
+    now = time.time()
+    if phone not in _sms_order_times:
+        _sms_order_times[phone] = deque(maxlen=100)
+    q = _sms_order_times[phone]
+    while q and q[0] < now - _HOUR_SECS:
+        q.popleft()
+    if len(q) >= _SMS_MAX_PER_HOUR:
+        return False
+    q.append(now)
+    return True
 
 
 def _twiml_message(body: str) -> str:
@@ -66,8 +89,12 @@ async def ingest_sms(request: Request):
     if not customer:
         return Response(content=_twiml_message(TWIML_UNKNOWN_NUMBER), media_type="application/xml")
 
+    if not _sms_rate_limit_check(from_phone):
+        return Response(content=_twiml_message(SMS_RATE_LIMIT_MESSAGE), media_type="application/xml")
+
     customer_id = customer["customer_id"]
     customer_name = (customer["name"] or "there").strip()
+    body_text = sanitize_order_input(body_text)
     ack_message = f"Got it, {customer_name}! Processing your order now..."
     try:
         await get_ws_manager().broadcast({
@@ -95,26 +122,33 @@ async def ingest_web(body: IngestWebRequest):
         raise HTTPException(status_code=404, detail="Customer not found")
     customer_name = (customer.get("name") or "Customer").strip()
 
+    raw_message = sanitize_order_input(body.message or "")
+
     try:
         await get_ws_manager().broadcast({
             "type": "order_received",
             "order_id": "pending",
             "customer_name": customer_name,
             "channel": body.channel or "web",
-            "raw_message": (body.message or "")[:500],
+            "raw_message": raw_message[:500],
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
     except Exception:
         pass
 
     try:
-        result, summary = await asyncio.to_thread(
-            run_orchestrator,
-            body.message,
-            body.customer_id,
-            body.channel,
-            customer_phone="",
+        result, summary = await asyncio.wait_for(
+            asyncio.to_thread(
+                run_orchestrator,
+                raw_message,
+                body.customer_id,
+                body.channel,
+                customer_phone="",
+            ),
+            timeout=14.0,
         )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Order processing timed out (15s). Please retry.")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Orchestrator failed: {e}") from e
 

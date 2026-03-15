@@ -2,12 +2,20 @@
 from strands import Agent, tool
 
 from backend.agents.models import get_bedrock_model
+from backend.agents.output_parser import parse_agent_json_with_retry
 from backend.tools.customer_intel_tools import (
     create_customer_alert,
     get_customer_full_history,
     get_similar_customers,
     update_customer_health,
 )
+
+ANALYZE_CUSTOMER_ORDER_EXPECTED_KEYS = [
+    "customer_id",
+    "analysis_summary",
+    "alerts",
+    "metrics",
+]
 
 CUSTOMER_INTEL_SYSTEM_PROMPT = """You are a customer intelligence analyst for FreshFlow food distributor. After every order is processed and confirmed, you analyze the customer's ordering patterns and generate insights that help the sales team retain customers and grow accounts.
 
@@ -42,7 +50,7 @@ customer_intel_agent = Agent(
 
 
 @tool
-def analyze_customer_order(customer_id: str, order_summary_json: str) -> str:
+def analyze_customer_order(customer_id: str, order_summary_json: str) -> dict:
     """
     Analyze a customer's order for patterns, churn risk, and upsell opportunities.
     Call after the order is confirmed and the customer has been notified. Uses full
@@ -53,24 +61,18 @@ def analyze_customer_order(customer_id: str, order_summary_json: str) -> str:
         order_summary_json: Condensed order info (items, total, date) as JSON string.
 
     Returns:
-        JSON string with customer_id, customer_name, analysis_summary, alerts[], metrics.
+        Dict with customer_id, analysis_summary, alerts, metrics.
+        On parse failure after retry, returns dict with "error" and "agent_name" keys.
     """
     prompt = f"""Analyze this order. Customer ID: {customer_id}.
 
 Order summary: {order_summary_json}
 
 Use get_customer_full_history and get_similar_customers. Compare frequency, value, product mix, and peers. Create alerts only when genuinely notable (churn_risk, upsell, anomaly, growth_signal, milestone). Normal order from regular customer = zero alerts. Call create_customer_alert for each alert and update_customer_health if needed. Return a single JSON object with customer_id, customer_name, analysis_summary, alerts, metrics. No markdown."""
-    result = customer_intel_agent.invoke(prompt)
-    if hasattr(result, "message") and result.message:
-        return result.message if isinstance(result.message, str) else str(result.message)
-    if hasattr(result, "content") and result.content:
-        parts = result.content
-        if isinstance(parts, list) and parts:
-            first = parts[0]
-            if hasattr(first, "text"):
-                return first.text
-            if isinstance(first, dict) and "text" in first:
-                return first["text"]
-            return str(first)
-        return str(parts)
-    return str(result)
+    return parse_agent_json_with_retry(
+        customer_intel_agent,
+        prompt,
+        ANALYZE_CUSTOMER_ORDER_EXPECTED_KEYS,
+        "analyze_customer_order",
+        max_retries=1,
+    )

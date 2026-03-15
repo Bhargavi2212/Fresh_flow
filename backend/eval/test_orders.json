@@ -1,0 +1,230 @@
+[
+  {
+    "test_id": "simple-1",
+    "customer_id": "CUST-001",
+    "raw_message": "I need 2 cases of king salmon and 1 case of cod please.",
+    "expected_items": [
+      {"product": "king salmon", "quantity": 2, "unit": "case"},
+      {"product": "cod", "quantity": 1, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Simple two-item order with clear product names"
+  },
+  {
+    "test_id": "simple-2",
+    "customer_id": "CUST-002",
+    "raw_message": "Please send 3 cases strawberries, 2 cases lemons, 1 case limes.",
+    "expected_items": [
+      {"product": "strawberries", "quantity": 3, "unit": "flat"},
+      {"product": "lemons", "quantity": 2, "unit": "case"},
+      {"product": "limes", "quantity": 1, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Simple produce order"
+  },
+  {
+    "test_id": "simple-3",
+    "customer_id": "CUST-003",
+    "raw_message": "Order: 5 cases jumbo shrimp 16/20, 2 cases sea scallops.",
+    "expected_items": [
+      {"product": "jumbo shrimp", "quantity": 5, "unit": "case"},
+      {"product": "sea scallops", "quantity": 2, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Simple shellfish order"
+  },
+  {
+    "test_id": "simple-4",
+    "customer_id": "CUST-010",
+    "raw_message": "We need 10 cases bottled water and 4 cases olive oil.",
+    "expected_items": [
+      {"product": "bottled water", "quantity": 10, "unit": "case"},
+      {"product": "olive oil", "quantity": 4, "unit": "each"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Simple dry goods and beverages"
+  },
+  {
+    "test_id": "simple-5",
+    "customer_id": "CUST-015",
+    "raw_message": "2 cases butter salted, 3 cases eggs dozen, 1 case heavy cream.",
+    "expected_items": [
+      {"product": "butter", "quantity": 2, "unit": "lb"},
+      {"product": "eggs", "quantity": 3, "unit": "dozen"},
+      {"product": "heavy cream", "quantity": 1, "unit": "each"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Simple dairy order"
+  },
+  {
+    "test_id": "correction-1",
+    "customer_id": "CUST-005",
+    "raw_message": "Actually change that to 4 cases salmon not 2. And add 1 case dover sole.",
+    "expected_items": [
+      {"product": "salmon", "quantity": 4, "unit": "case"},
+      {"product": "dover sole", "quantity": 1, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Correction-style order (interpret as final intent)"
+  },
+  {
+    "test_id": "correction-2",
+    "customer_id": "CUST-007",
+    "raw_message": "Scratch the tilapia. I want 3 cases halibut and 2 cases branzino instead.",
+    "expected_items": [
+      {"product": "halibut", "quantity": 3, "unit": "case"},
+      {"product": "branzino", "quantity": 2, "unit": "each"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Correction: replace item with others"
+  },
+  {
+    "test_id": "correction-3",
+    "customer_id": "CUST-008",
+    "raw_message": "Make it 6 cases of strawberries not 3. Keep the lemons at 2.",
+    "expected_items": [
+      {"product": "strawberries", "quantity": 6, "unit": "flat"},
+      {"product": "lemons", "quantity": 2, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Quantity correction"
+  },
+  {
+    "test_id": "usual-1",
+    "customer_id": "CUST-001",
+    "raw_message": "Just the usual please.",
+    "expected_items": [],
+    "expected_status": "confirmed",
+    "description": "The usual (may have 0 expected if no history; or match history)"
+  },
+  {
+    "test_id": "usual-2",
+    "customer_id": "CUST-002",
+    "raw_message": "Send my regular order.",
+    "expected_items": [],
+    "expected_status": "confirmed",
+    "description": "Regular/usual order"
+  },
+  {
+    "test_id": "vague-1",
+    "customer_id": "CUST-004",
+    "raw_message": "We need some fish for the weekend special. Salmon and maybe some white fish.",
+    "expected_items": [
+      {"product": "salmon", "quantity": 1, "unit": "case"},
+      {"product": "cod", "quantity": 1, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Vague product request"
+  },
+  {
+    "test_id": "vague-2",
+    "customer_id": "CUST-006",
+    "raw_message": "Fruit for the bar - berries and citrus.",
+    "expected_items": [
+      {"product": "strawberries", "quantity": 1, "unit": "flat"},
+      {"product": "lemons", "quantity": 1, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Vague category request"
+  },
+  {
+    "test_id": "vague-3",
+    "customer_id": "CUST-009",
+    "raw_message": "Dairy basics: cream, butter, eggs.",
+    "expected_items": [
+      {"product": "heavy cream", "quantity": 1, "unit": "each"},
+      {"product": "butter", "quantity": 1, "unit": "lb"},
+      {"product": "eggs", "quantity": 1, "unit": "dozen"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Vague list"
+  },
+  {
+    "test_id": "out-of-stock-1",
+    "customer_id": "CUST-011",
+    "raw_message": "50 cases yellowfin tuna and 20 cases swordfish.",
+    "expected_items": [
+      {"product": "yellowfin", "quantity": 50, "unit": "case"},
+      {"product": "swordfish", "quantity": 20, "unit": "case"}
+    ],
+    "expected_status": "needs_review",
+    "description": "Likely out of stock or partial (high quantity)"
+  },
+  {
+    "test_id": "out-of-stock-2",
+    "customer_id": "CUST-012",
+    "raw_message": "100 cases live maine lobster.",
+    "expected_items": [
+      {"product": "maine lobster", "quantity": 100, "unit": "each"}
+    ],
+    "expected_status": "needs_review",
+    "description": "Very high quantity may trigger OOS"
+  },
+  {
+    "test_id": "email-1",
+    "customer_id": "CUST-013",
+    "raw_message": "Hi, our order for Thursday: 4 cases roma tomatoes, 2 cases mixed greens, 3 cases arugula. Thanks!",
+    "expected_items": [
+      {"product": "roma tomatoes", "quantity": 4, "unit": "case"},
+      {"product": "mixed greens", "quantity": 2, "unit": "case"},
+      {"product": "arugula", "quantity": 3, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Email-style polite order"
+  },
+  {
+    "test_id": "email-2",
+    "customer_id": "CUST-014",
+    "raw_message": "Good morning. Please deliver: 2 cases spaghetti, 1 case penne, 2 cases olive oil. Best regards.",
+    "expected_items": [
+      {"product": "spaghetti", "quantity": 2, "unit": "case"},
+      {"product": "penne", "quantity": 1, "unit": "case"},
+      {"product": "olive oil", "quantity": 2, "unit": "each"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Email-style dry goods"
+  },
+  {
+    "test_id": "mixed-1",
+    "customer_id": "CUST-020",
+    "raw_message": "2 cases salmon, 1 case scallops, 3 flats strawberries, 2 cases lemons, 1 case butter.",
+    "expected_items": [
+      {"product": "salmon", "quantity": 2, "unit": "case"},
+      {"product": "scallops", "quantity": 1, "unit": "case"},
+      {"product": "strawberries", "quantity": 3, "unit": "flat"},
+      {"product": "lemons", "quantity": 2, "unit": "case"},
+      {"product": "butter", "quantity": 1, "unit": "lb"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Mixed seafood, produce, dairy"
+  },
+  {
+    "test_id": "mixed-2",
+    "customer_id": "CUST-025",
+    "raw_message": "Order: shrimp 16/20 3 cases, dover sole 2, basil 5 bunches, olive oil 2, flour 1.",
+    "expected_items": [
+      {"product": "jumbo shrimp", "quantity": 3, "unit": "case"},
+      {"product": "dover sole", "quantity": 2, "unit": "case"},
+      {"product": "basil", "quantity": 5, "unit": "each"},
+      {"product": "olive oil", "quantity": 2, "unit": "each"},
+      {"product": "flour", "quantity": 1, "unit": "case"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Mixed categories"
+  },
+  {
+    "test_id": "mixed-3",
+    "customer_id": "CUST-030",
+    "raw_message": "We need salmon 2, cod 1, broccoli 2, carrots 1, heavy cream 3, eggs 2 dozen.",
+    "expected_items": [
+      {"product": "salmon", "quantity": 2, "unit": "case"},
+      {"product": "cod", "quantity": 1, "unit": "case"},
+      {"product": "broccoli", "quantity": 2, "unit": "case"},
+      {"product": "carrots", "quantity": 1, "unit": "case"},
+      {"product": "heavy cream", "quantity": 3, "unit": "each"},
+      {"product": "eggs", "quantity": 2, "unit": "dozen"}
+    ],
+    "expected_status": "confirmed",
+    "description": "Large mixed order"
+  }
+]

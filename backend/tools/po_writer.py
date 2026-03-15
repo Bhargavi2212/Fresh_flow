@@ -9,25 +9,28 @@ from backend.services.websocket_manager import get_ws_manager
 
 
 @tool
-def create_purchase_order(supplier_id: str, items: str, triggered_by: str) -> str:
+def create_purchase_order(supplier_id: str, items: str, triggered_by: str, reasoning: str = "") -> str:
     """
     Create a purchase order for a supplier with the given line items.
     Items must be a JSON string: array of objects with sku_id and quantity.
     Unit prices are looked up from supplier_products. PO id is generated as PO-2026-XXXXXX.
+    Provide reasoning (why this supplier and quantity) for visibility.
 
     Args:
         supplier_id: Supplier to order from.
         items: JSON string array of {sku_id, quantity} (e.g. [{"sku_id":"SAL-001","quantity":10}]).
         triggered_by: Order ID or reason that triggered this PO (e.g. order_id for traceability).
+        reasoning: Short explanation of why this supplier and quantity (stored for dashboard).
 
     Returns:
         JSON string of the created PO: po_id, supplier_id, status, total_amount, triggered_by,
-        items (with sku_id, quantity, unit_price, line_total).
+        reasoning, items (with sku_id, quantity, unit_price, line_total).
     """
     if not supplier_id or not str(supplier_id).strip():
         return json.dumps({"error": "supplier_id required"})
     supplier_id = str(supplier_id).strip()
     triggered_by = (triggered_by or "").strip() or "manual"
+    reasoning = (reasoning or "").strip()[:2000] or None
     try:
         item_list = json.loads(items) if isinstance(items, str) else items
     except (json.JSONDecodeError, TypeError):
@@ -70,13 +73,14 @@ def create_purchase_order(supplier_id: str, items: str, triggered_by: str) -> st
 
     execute_sync(
         """
-        INSERT INTO purchase_orders (po_id, supplier_id, status, total_amount, triggered_by)
-        VALUES ($1, $2, 'draft', $3, $4)
+        INSERT INTO purchase_orders (po_id, supplier_id, status, total_amount, triggered_by, reasoning)
+        VALUES ($1, $2, 'draft', $3, $4, $5)
         """,
         po_id,
         supplier_id,
         round(total_amount, 2),
         triggered_by,
+        reasoning,
     )
     for li in line_items:
         execute_sync(
@@ -111,5 +115,6 @@ def create_purchase_order(supplier_id: str, items: str, triggered_by: str) -> st
         "status": "draft",
         "total_amount": round(total_amount, 2),
         "triggered_by": triggered_by,
+        "reasoning": reasoning,
         "items": line_items,
     })

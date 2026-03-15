@@ -108,6 +108,7 @@ class PurchaseOrderDetail(BaseModel):
     status: str | None = None
     total_amount: Decimal | None = None
     triggered_by: str | None = None
+    reasoning: str | None = None
     created_at: Any = None
     items: list[POItem] = []
     supplier_name: str | None = None

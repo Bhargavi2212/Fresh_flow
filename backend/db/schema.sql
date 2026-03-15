@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
     status VARCHAR(20),
     total_amount DECIMAL(10,2),
     triggered_by VARCHAR(20),
+    reasoning TEXT,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -153,3 +154,13 @@ CREATE TABLE IF NOT EXISTS customer_alerts (
     acknowledged BOOLEAN DEFAULT false,
     created_at TIMESTAMP DEFAULT NOW()
 );
+
+-- Phase 5: add reasoning to purchase_orders (for existing DBs that had table before this column)
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'purchase_orders' AND column_name = 'reasoning'
+    ) THEN
+        ALTER TABLE purchase_orders ADD COLUMN reasoning TEXT;
+    END IF;
+END $$;

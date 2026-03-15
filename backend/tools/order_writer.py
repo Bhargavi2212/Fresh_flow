@@ -1,11 +1,58 @@
 """Agent tool: persist confirmed order and items (for Orchestrator)."""
 import json
+import logging
 from datetime import datetime, timezone
 
 from strands import tool
 
-from backend.services.sync_database import execute_sync, fetch_one_sync, fetch_val_sync
+from backend.services.sync_database import execute_sync, fetch_all_sync, fetch_one_sync, fetch_val_sync
 from backend.services.websocket_manager import get_ws_manager
+
+logger = logging.getLogger(__name__)
+
+
+def deduct_inventory(sku_id: str, quantity: float) -> dict:
+    """
+    Deduct quantity from inventory for sku_id using FIFO (earliest expiration first).
+    Fetches lots ordered by expiration_date ASC, subtracts from each until fulfilled.
+    Returns total_deducted, lots_modified, remaining_to_deduct.
+    """
+    remaining = float(quantity)
+    total_deducted = 0.0
+    lots_modified = 0
+    lots = fetch_all_sync(
+        """SELECT id, quantity, expiration_date FROM inventory
+           WHERE sku_id = $1 AND quantity > 0
+           ORDER BY expiration_date ASC NULLS LAST, id ASC""",
+        sku_id,
+    )
+    for row in lots:
+        if remaining <= 0:
+            break
+        lot_id = row["id"]
+        lot_qty = float(row["quantity"] or 0)
+        deduct = min(remaining, lot_qty)
+        if deduct <= 0:
+            continue
+        new_qty = lot_qty - deduct
+        execute_sync(
+            "UPDATE inventory SET quantity = $1, updated_at = NOW() WHERE id = $2",
+            new_qty,
+            lot_id,
+        )
+        total_deducted += deduct
+        remaining -= deduct
+        lots_modified += 1
+    if remaining > 0:
+        logger.warning(
+            "deduct_inventory: sku_id=%s requested=%.2f total_deducted=%.2f remaining_to_deduct=%.2f",
+            sku_id, quantity, total_deducted, remaining,
+        )
+    return {
+        "total_deducted": total_deducted,
+        "lots_modified": lots_modified,
+        "remaining_to_deduct": remaining,
+    }
 
 
 @tool
@@ -112,7 +159,33 @@ def save_confirmed_order(order_data: str) -> str:
             notes,
         )
 
-    # Broadcast order_confirmed for dashboard real-time updates
+    # FIFO inventory deduction for available/partial items; track before/after per sku for WebSocket
+    deduction_log: dict[str, tuple[float, float]] = {}
+    for it in items:
+        item_status_val = (it.get("availability_status") or it.get("availabilityStatus") or "available")[:20]
+        if item_status_val not in ("available", "partial"):
+            continue
+        sku_id = (it.get("sku_id") or it.get("skuId") or "").strip()
+        if not sku_id:
+            continue
+        qty = float(it.get("quantity") or 0)
+        if qty <= 0:
+            continue
+        prev_row = fetch_one_sync(
+            "SELECT COALESCE(SUM(quantity), 0) AS total FROM inventory WHERE sku_id = $1",
+            sku_id,
+        )
+        prev_qty = float(prev_row["total"]) if prev_row else 0.0
+        ded = deduct_inventory(sku_id, qty)
+        new_qty = prev_qty - ded["total_deducted"]
+        deduction_log[sku_id] = (prev_qty, new_qty)
+        if ded["remaining_to_deduct"] > 0:
+            logger.warning(
+                "save_confirmed_order: sku_id=%s remaining_to_deduct=%.2f",
+                sku_id, ded["remaining_to_deduct"],
+            )
+
+    # Broadcast order_confirmed and inventory_update with real before/after
     try:
         cust = fetch_one_sync("SELECT name FROM customers WHERE customer_id = $1", customer_id)
         customer_name = (cust["name"] or "Customer").strip() if cust else "Customer"
@@ -126,26 +199,21 @@ def save_confirmed_order(order_data: str) -> str:
             "confidence_score": confidence_score,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
-        # Stub inventory_update per item (current stock; Phase 4 may not decrement inventory)
-        for it in items:
-            sku_id = (it.get("sku_id") or it.get("skuId") or "").strip()
-            if not sku_id:
-                continue
+        for sku_id, (prev_qty, new_qty) in deduction_log.items():
             inv = fetch_one_sync(
-                "SELECT quantity, reorder_point FROM inventory WHERE sku_id = $1",
+                "SELECT reorder_point FROM inventory WHERE sku_id = $1 LIMIT 1",
                 sku_id,
             )
+            reorder = float(inv["reorder_point"]) if inv and inv.get("reorder_point") is not None else 0.0
             prod = fetch_one_sync("SELECT name FROM products WHERE sku_id = $1", sku_id)
             product_name = (prod["name"] or sku_id) if prod else sku_id
-            qty = float(inv["quantity"]) if inv and inv.get("quantity") is not None else 0.0
-            reorder = float(inv["reorder_point"]) if inv and inv.get("reorder_point") is not None else 0.0
             get_ws_manager().broadcast_sync({
                 "type": "inventory_update",
                 "sku_id": sku_id,
                 "product_name": product_name,
-                "previous_quantity": qty,
-                "new_quantity": qty,
-                "is_low_stock": qty <= reorder if reorder else False,
+                "previous_quantity": prev_qty,
+                "new_quantity": new_qty,
+                "is_low_stock": new_qty <= reorder if reorder else False,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
     except Exception:
@@ -155,7 +223,7 @@ def save_confirmed_order(order_data: str) -> str:
 
 
 @tool
-def append_order_trace(order_id: str, trace_key: str, trace_value: str) -> str:
+def append_order_trace(order_id: str, trace_key: str, trace_value: str | dict) -> str:
     """
     Append a key to an order's agent_trace (e.g. customer_intel after analyze_customer_order).
     Call after the order exists and you have new trace data to store.
@@ -163,7 +231,7 @@ def append_order_trace(order_id: str, trace_key: str, trace_value: str) -> str:
     Args:
         order_id: The order's ID (from save_confirmed_order).
         trace_key: Key to add (e.g. "customer_intel").
-        trace_value: JSON string value to merge into agent_trace.
+        trace_value: JSON string or dict to merge into agent_trace.
 
     Returns:
         JSON with success true/false.
@@ -172,6 +240,8 @@ def append_order_trace(order_id: str, trace_key: str, trace_value: str) -> str:
     trace_key = (trace_key or "").strip()
     if not order_id or not trace_key:
         return json.dumps({"success": False, "error": "order_id and trace_key required"})
+    if isinstance(trace_value, dict):
+        trace_value = json.dumps(trace_value, default=str)
     try:
         # Ensure trace_value is valid JSON so we can cast to jsonb
         json.loads(trace_value)

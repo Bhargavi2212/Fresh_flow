@@ -23,16 +23,23 @@ def get_bedrock_model(
     """
     Return a BedrockModel for Nova 2 Lite with the given extended-thinking effort.
     Order Intake uses "medium"; Inventory uses "low".
+    If BEDROCK_GUARDRAIL_ID is set, guardrail config is added (when supported by the client).
     """
     settings = get_settings()
+    additional: dict = {
+        "reasoningConfig": {
+            "type": "enabled",
+            "maxReasoningEffort": reasoning_effort,
+        }
+    }
+    if settings.bedrock_guardrail_id:
+        additional["guardrailConfig"] = {
+            "guardrailIdentifier": settings.bedrock_guardrail_id,
+            "guardrailVersion": settings.bedrock_guardrail_version or "DRAFT",
+        }
     return BedrockModel(
         model_id="us.amazon.nova-2-lite-v1:0",
         region_name=settings.aws_default_region or "us-east-1",
         streaming=False,
-        additional_request_fields={
-            "reasoningConfig": {
-                "type": "enabled",
-                "maxReasoningEffort": reasoning_effort,
-            }
-        },
+        additional_request_fields=additional,
     )

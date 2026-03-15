@@ -2,11 +2,18 @@
 from strands import Agent, tool
 
 from backend.agents.models import get_bedrock_model
+from backend.agents.output_parser import parse_agent_json_with_retry
 from backend.tools import (
     create_purchase_order,
     get_demand_forecast,
     get_suppliers_for_product,
 )
+
+GENERATE_PURCHASE_ORDERS_EXPECTED_KEYS = [
+    "purchase_orders",
+    "total_procurement_cost",
+    "items_not_sourced",
+]
 
 PROCUREMENT_SYSTEM_PROMPT = """You are a procurement specialist for FreshFlow food distributor. You receive procurement signals (items that need reordering: sku_id, current_quantity, reorder_point) and create purchase orders by selecting suppliers and quantities.
 
@@ -22,7 +29,7 @@ SUPPLIER SELECTION RULES (follow exactly):
 WORKFLOW:
 1. For each sku_id in the procurement signals, call get_suppliers_for_product(sku_id) and get_demand_forecast(sku_id, days=7).
 2. Apply the supplier selection rules above. For each product, choose supplier and quantity (respect min_order_qty; cap perishables at 5 days demand).
-3. Group items by supplier and call create_purchase_order(supplier_id, items_json, triggered_by) for each supplier. items_json must be a JSON string array of objects with sku_id and quantity, e.g. [{"sku_id":"SAL-001","quantity":10}].
+3. Group items by supplier and call create_purchase_order(supplier_id, items_json, triggered_by, reasoning) for each supplier. items_json must be a JSON string array of objects with sku_id and quantity. You MUST pass a reasoning parameter (short explanation of why this supplier and these quantities — e.g. lowest price, within 5% so chose shorter lead time, urgency override).
 4. Compute expected_delivery_date for each PO as today + supplier lead_time_days (from get_suppliers_for_product).
 
 OUTPUT FORMAT: Return a single JSON object with these exact keys:
@@ -41,7 +48,7 @@ procurement_agent = Agent(
 
 
 @tool
-def generate_purchase_orders(procurement_signals_json: str, triggered_by_order_id: str) -> str:
+def generate_purchase_orders(procurement_signals_json: str, triggered_by_order_id: str) -> dict:
     """
     Generate purchase orders from procurement signals (e.g. from Inventory Agent).
     For each signal (sku_id, current_quantity, reorder_point), finds suppliers, compares price/lead time,
@@ -53,25 +60,18 @@ def generate_purchase_orders(procurement_signals_json: str, triggered_by_order_i
         triggered_by_order_id: Order ID that triggered this procurement (for traceability).
 
     Returns:
-        JSON string with purchase_orders (each: po_id, supplier_id, supplier_name, items, po_total,
-        expected_delivery_date, reasoning), total_procurement_cost, items_not_sourced.
+        Dict with purchase_orders, total_procurement_cost, items_not_sourced.
+        On parse failure after retry, returns dict with "error" and "agent_name" keys.
     """
     prompt = f"""Create purchase orders for these procurement signals. Triggered by order: {triggered_by_order_id}.
 
 {procurement_signals_json}
 
 Use get_suppliers_for_product and get_demand_forecast for each product. Apply the 5%/10%/urgency supplier rules. Call create_purchase_order per supplier. Return a single JSON object with purchase_orders (each with expected_delivery_date and reasoning), total_procurement_cost, and items_not_sourced. No markdown."""
-    result = procurement_agent.invoke(prompt)
-    if hasattr(result, "message") and result.message:
-        return result.message if isinstance(result.message, str) else str(result.message)
-    if hasattr(result, "content") and result.content:
-        parts = result.content
-        if isinstance(parts, list) and parts:
-            first = parts[0]
-            if hasattr(first, "text"):
-                return first.text
-            if isinstance(first, dict) and "text" in first:
-                return first["text"]
-            return str(first)
-        return str(parts)
-    return str(result)
+    return parse_agent_json_with_retry(
+        procurement_agent,
+        prompt,
+        GENERATE_PURCHASE_ORDERS_EXPECTED_KEYS,
+        "generate_purchase_orders",
+        max_retries=1,
+    )
