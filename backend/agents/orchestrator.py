@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 from backend.agents.order_intake import parse_order
+from backend.agents.order_intake_rag import parse_order_rag
 from backend.agents.inventory_agent import check_order_inventory
 from backend.agents.procurement import generate_purchase_orders
 from backend.agents.customer_intel import analyze_customer_order
@@ -245,7 +246,44 @@ def run_orchestrator(
     _broadcast(order_id, "order_intake", "started", "Parsing order", None)
     if parse_result is None:
         try:
-            parse_result = parse_order(raw_message, customer_id)
+            parse_result = parse_order_rag(raw_message, customer_id)
+
+            unresolved_items = parse_result.get("items_needing_review") or []
+            if unresolved_items:
+                logger.info(
+                    "order_writer: rag parser left %s unresolved item(s), attempting LLM refinement",
+                    len(unresolved_items),
+                )
+                llm_result = parse_order(raw_message, customer_id)
+                if isinstance(llm_result, dict) and not llm_result.get("error"):
+                    rag_items = parse_result.get("order_items") or []
+                    llm_items = llm_result.get("order_items") or []
+                    merged_by_sku: dict[str, dict] = {}
+
+                    for item in rag_items + llm_items:
+                        sku_id = (item.get("sku_id") or "").strip()
+                        if not sku_id:
+                            continue
+                        existing = merged_by_sku.get(sku_id)
+                        if not existing or float(item.get("confidence") or 0) >= float(existing.get("confidence") or 0):
+                            merged_by_sku[sku_id] = item
+
+                    merged_items = list(merged_by_sku.values())
+                    parse_result = {
+                        "customer_id": customer_id,
+                        "order_items": merged_items,
+                        "total_amount": round(
+                            sum(float(i.get("line_total") or 0) for i in merged_items),
+                            2,
+                        ),
+                        "items_needing_review": llm_result.get("items_needing_review")
+                        if llm_result.get("items_needing_review") is not None
+                        else unresolved_items,
+                        "parsing_notes": (
+                            f"{parse_result.get('parsing_notes') or ''}; "
+                            f"LLM refinement attempted for unresolved items"
+                        ).strip("; "),
+                    }
         except Exception as e:
             _broadcast(order_id, "order_intake", "failed", str(e), int((time.perf_counter() - t0) * 1000))
             summary = {
