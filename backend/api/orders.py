@@ -1,4 +1,6 @@
 """GET /api/orders, GET /api/orders/{order_id}, PATCH /api/orders/{order_id}."""
+from datetime import datetime, date
+
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.api.schemas import Customer, OrderDetail, OrderItemDetail, OrderStatusUpdate, PaginationMeta
@@ -32,11 +34,25 @@ async def list_orders(
         params.append(customer_id)
         conditions.append(f"o.customer_id = ${len(params)}")
     if created_after:
-        params.append(created_after)
-        conditions.append(f"o.created_at >= ${len(params)}::timestamp")
+        try:
+            if "T" in created_after or " " in created_after:
+                params.append(datetime.fromisoformat(created_after.replace("Z", "+00:00")))
+            else:
+                params.append(datetime.combine(date.fromisoformat(created_after), datetime.min.time()))
+        except (ValueError, TypeError):
+            pass
+        else:
+            conditions.append(f"o.created_at >= ${len(params)}::timestamp")
     if created_before:
-        params.append(created_before)
-        conditions.append(f"o.created_at <= ${len(params)}::timestamp")
+        try:
+            if "T" in created_before or " " in created_before:
+                params.append(datetime.fromisoformat(created_before.replace("Z", "+00:00")))
+            else:
+                params.append(datetime.combine(date.fromisoformat(created_before), datetime.max.time()))
+        except (ValueError, TypeError):
+            pass
+        else:
+            conditions.append(f"o.created_at <= ${len(params)}::timestamp")
 
     where = " AND ".join(conditions)
     total_row = await fetch_one(f"SELECT COUNT(*)::int AS c FROM orders o WHERE {where}", *params)

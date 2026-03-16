@@ -5,9 +5,10 @@ import OrderDetail from './OrderDetail.jsx';
  * List of recent orders (newest first). Each row: timestamp, customer, channel icon,
  * status badge. Click expands OrderDetail. Animate new orders from WebSocket.
  */
-export default function OrderFeed({ orders, wsOrderEvents, apiUrl, loading }) {
+export default function OrderFeed({ orders, wsOrderEvents, apiUrl, loading, onOrderStatusChange }) {
   const [expandedId, setExpandedId] = useState(null);
   const [orderDetails, setOrderDetails] = useState({});
+  const [updatingOrderId, setUpdatingOrderId] = useState(null);
 
   // Merge REST orders with WS events: show WS "order_received" / "order_confirmed" first, then REST.
   // Hide "pending" placeholder when a confirmed order exists for same customer within 2 minutes.
@@ -77,6 +78,31 @@ export default function OrderFeed({ orders, wsOrderEvents, apiUrl, loading }) {
     return () => { cancelled = true; };
   }, [expandedId, apiUrl, orderDetails]);
 
+  const updateOrderStatus = (orderId, newStatus) => {
+    if (!orderId || updatingOrderId) return;
+    setUpdatingOrderId(orderId);
+    fetch(`${apiUrl}/api/orders/${orderId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error(r.statusText);
+        return r.json();
+      })
+      .then((data) => {
+        if (data?.order_id && data?.status) {
+          setOrderDetails((prev) => ({
+            ...prev,
+            [data.order_id]: { ...(prev[data.order_id] || {}), status: data.status },
+          }));
+          onOrderStatusChange?.();
+        }
+      })
+      .catch(() => {})
+      .finally(() => setUpdatingOrderId(null));
+  };
+
   if (loading && orders.length === 0) {
     return (
       <section className="bg-white rounded-lg border border-gray-200 p-4">
@@ -136,11 +162,33 @@ export default function OrderFeed({ orders, wsOrderEvents, apiUrl, loading }) {
                 <span className="ml-auto text-gray-400">{expandedId === o.order_id ? '▼' : '▶'}</span>
               </button>
               {expandedId === o.order_id && (
-                <OrderDetail
-                  order={orderDetails[o.order_id] ?? o}
-                  itemCount={o.item_count ?? o.items?.length}
-                  totalAmount={o.total_amount}
-                />
+                <>
+                  <OrderDetail
+                    order={orderDetails[o.order_id] ?? o}
+                    itemCount={o.item_count ?? o.items?.length}
+                    totalAmount={o.total_amount}
+                  />
+                  {(orderDetails[o.order_id] ?? o).status === 'needs_review' && (
+                    <div className="mt-3 pt-3 border-t border-gray-200 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => updateOrderStatus(o.order_id, 'confirmed')}
+                        disabled={updatingOrderId === o.order_id}
+                        className="px-3 py-1.5 rounded-lg bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {updatingOrderId === o.order_id ? 'Updating…' : 'Accept order'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateOrderStatus(o.order_id, 'cancelled')}
+                        disabled={updatingOrderId === o.order_id}
+                        className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Reject order
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </li>
           ))}

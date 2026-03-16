@@ -44,6 +44,8 @@ ITEM_FIRST_PATTERN = re.compile(
 
 HIGH_CONFIDENCE = 0.85
 REVIEW_CONFIDENCE = 0.70
+# Include best match in order_items when score >= this so pipeline runs (status will be needs_review for low scores)
+MIN_ACCEPT_CONFIDENCE = 0.25
 
 
 
@@ -155,6 +157,17 @@ def parse_order_rag(
                 "matched_name": best.get("name"),
                 "confidence": round(confidence, 4),
                 "reason": "low_confidence_match",
+            })
+        elif confidence >= MIN_ACCEPT_CONFIDENCE:
+            # Include in order_items so pipeline runs (inventory, save, confirm); status will be needs_review
+            order_items.append(item)
+            review_items.append({
+                "requested_phrase": phrase,
+                "requested_quantity": quantity,
+                "matched_sku_id": best.get("sku_id"),
+                "matched_name": best.get("name"),
+                "confidence": round(confidence, 4),
+                "reason": "below_review_threshold_accepted",
             })
         else:
             review_items.append({

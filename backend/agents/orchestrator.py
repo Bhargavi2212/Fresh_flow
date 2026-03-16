@@ -161,7 +161,7 @@ def _build_free_text_order_items(raw_message: str, customer_id: str) -> tuple[li
             if not sku_id:
                 return None
             sim = float(best.get("similarity_score") or 0)
-            if sim < 0.35:
+            if sim < 0.22:
                 return None
             unit_price = float(best.get("unit_price") or 0)
             product_name = best.get("name") or sku_id
@@ -292,6 +292,10 @@ def run_orchestrator(
     start_tracking()
     _broadcast(order_id, "orchestrator", "started", "Processing order", None)
     start_total = time.perf_counter()
+    logger.info(
+        "orchestrator: started customer_id=%s channel=%s raw_message_len=%s",
+        customer_id, channel or "web", len(raw_message or ""),
+    )
 
     # --- Fast path: "the usual" / "last order" ---
     parse_result = None
@@ -306,6 +310,7 @@ def run_orchestrator(
                 "items_needing_review": [],
                 "parsing_notes": parsing_notes,
             }
+            logger.info("orchestrator: fast path usual/last order, items=%s", len(order_items_built))
 
     clarification_choices = clarification_choices or {}
 
@@ -422,6 +427,10 @@ def run_orchestrator(
         }
         return None, summary
     _broadcast(order_id, "order_intake", "completed", "Parsed", int((time.perf_counter() - t0) * 1000))
+    logger.info(
+        "orchestrator: order_intake completed in %.0fms order_items=%s",
+        (time.perf_counter() - t0) * 1000, len(parse_result.get("order_items") or []),
+    )
 
     order_items = parse_result.get("order_items") or []
     total_amount = float(parse_result.get("total_amount") or 0)
@@ -433,7 +442,9 @@ def run_orchestrator(
             if isinstance(m, str) and m.strip():
                 mentions.append(m.strip())
             elif isinstance(m, dict):
-                phrase = (m.get("phrase") or m.get("mention") or m.get("text") or "").strip()
+                phrase = (
+                    m.get("phrase") or m.get("requested_phrase") or m.get("mention") or m.get("text") or ""
+                ).strip()
                 if phrase:
                     mentions.append(phrase)
         for it in items:
@@ -473,8 +484,13 @@ def run_orchestrator(
 
     if unresolved_mentions:
         all_explicitly_confirmed = all(bool((clarification_choices.get(m.get("phrase") or "") or "").strip()) for m in unresolved_mentions)
-        if not all_explicitly_confirmed:
+        # Only block the pipeline when we have nothing to save. If we have order_items, run inventory/save/confirm.
+        if not all_explicitly_confirmed and len(order_items) == 0:
             _broadcast(order_id, "order_intake", "needs_review", "Awaiting customer SKU confirmation", int((time.perf_counter() - t0) * 1000))
+            logger.info(
+                "orchestrator: returning awaiting_customer_confirmation (no order_items, unresolved=%s)",
+                len(unresolved_mentions),
+            )
             summary = {
                 "order_id": "",
                 "status": "awaiting_customer_confirmation",
@@ -493,7 +509,7 @@ def run_orchestrator(
             }
             return None, summary
 
-        # Apply explicit user choices before downstream inventory/save.
+        # Apply explicit user choices before downstream inventory/save (when we have order_items and/or confirmed choices).
         for mention in unresolved_mentions:
             phrase = mention.get("phrase") or ""
             chosen_sku = (clarification_choices.get(phrase) or "").strip()
@@ -579,6 +595,12 @@ def run_orchestrator(
     if isinstance(inv_result, dict) and inv_result.get("error"):
         inv_result = {"checked_items": order_items, "procurement_signals": [], "summary": {}}
     _broadcast(order_id, "inventory", "completed", "Checked", int((time.perf_counter() - t1) * 1000))
+    logger.info(
+        "orchestrator: inventory check completed in %.0fms checked_items=%s procurement_signals=%s",
+        (time.perf_counter() - t1) * 1000,
+        len(inv_result.get("checked_items") or order_items),
+        len(inv_result.get("procurement_signals") or []),
+    )
 
     checked_items = inv_result.get("checked_items") or order_items
     procurement_signals = inv_result.get("procurement_signals") or []
@@ -602,6 +624,10 @@ def run_orchestrator(
         status = "needs_review"
     else:
         status = "confirmed"  # with notes
+    logger.info(
+        "orchestrator: status=%s min_confidence=%.2f all_available=%s any_out_of_stock_no_sub=%s",
+        status, min_confidence, all_available, any_out_of_stock_no_sub,
+    )
 
     # --- Step 4: Procurement if needed ---
     purchase_orders_generated = 0
@@ -616,6 +642,12 @@ def run_orchestrator(
         if isinstance(proc_result, dict) and not proc_result.get("error"):
             purchase_orders_generated = len(proc_result.get("purchase_orders") or [])
         _broadcast(order_id, "procurement", "completed", f"{purchase_orders_generated} POs", int((time.perf_counter() - t2) * 1000))
+        logger.info(
+            "orchestrator: procurement completed in %.0fms purchase_orders_generated=%s",
+            (time.perf_counter() - t2) * 1000, purchase_orders_generated,
+        )
+    else:
+        logger.info("orchestrator: procurement not run (no procurement_signals)")
 
     # --- Step 5: Build order_data, save, get order_id ---
     agent_trace = {
@@ -704,6 +736,10 @@ def run_orchestrator(
         }
         return None, summary
     _broadcast(order_id, "order_writer", "completed", f"Saved {order_id}", int((time.perf_counter() - t3) * 1000))
+    logger.info(
+        "orchestrator: order_writer saved order_id=%s in %.0fms items=%s",
+        order_id, (time.perf_counter() - t3) * 1000, len(checked_items),
+    )
 
     # --- Step 6: Send confirmation ---
     items_summary = f"{len(checked_items)} items"
@@ -723,8 +759,13 @@ def run_orchestrator(
         )
         conf_obj = json.loads(conf_out) if isinstance(conf_out, str) else conf_out
         confirmation_sent = conf_obj.get("sent", False)
-    except Exception:
+        logger.info(
+            "orchestrator: order confirmation sent=%s order_id=%s customer_phone=%s",
+            confirmation_sent, order_id, "yes" if customer_phone else "no",
+        )
+    except Exception as e:
         confirmation_sent = False
+        logger.warning("orchestrator: order confirmation failed: %s", e)
 
     # --- Step 7: Analyze customer, append trace ---
     order_summary_json = json.dumps({
@@ -737,8 +778,9 @@ def run_orchestrator(
     try:
         intel_result = analyze_customer_order(customer_id, order_summary_json)
         append_order_trace(order_id, "customer_intel", intel_result)
-    except Exception:
-        pass
+        logger.info("orchestrator: customer_intel completed order_id=%s", order_id)
+    except Exception as e:
+        logger.warning("orchestrator: customer_intel failed: %s", e)
     try:
         append_order_trace(order_id, "token_usage", get_summary())
     except Exception:
@@ -751,6 +793,10 @@ def run_orchestrator(
 
     duration_ms = int((time.perf_counter() - start_total) * 1000)
     _broadcast(order_id, "orchestrator", "completed", f"Order {order_id} {status}", duration_ms)
+    logger.info(
+        "orchestrator: pipeline completed order_id=%s status=%s duration_ms=%s items=%s confirmation_sent=%s",
+        order_id, status, duration_ms, len(checked_items), confirmation_sent,
+    )
 
     summary = {
         "order_id": order_id,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useWebSocket } from '../hooks/useWebSocket.js';
 import OrderFeed from '../components/OrderFeed.jsx';
 import OrderDetail from '../components/OrderDetail.jsx';
@@ -93,6 +93,17 @@ export default function Dashboard() {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
+  }, [orderDateParams]);
+
+  const refetchOrders = useCallback(() => {
+    const { created_after, created_before } = orderDateParams;
+    const params = new URLSearchParams({ limit: '100' });
+    if (created_after) params.set('created_after', created_after);
+    if (created_before) params.set('created_before', created_before);
+    fetch(`${API_URL}/api/orders?${params}`)
+      .then((res) => res.json())
+      .then((data) => { if (data?.data) setOrders(data.data); })
+      .catch((err) => console.error('Orders fetch failed', err));
   }, [orderDateParams]);
 
   const lastAppliedCount = useRef(0);
@@ -228,6 +239,7 @@ export default function Dashboard() {
             wsOrderEvents={orderReceivedAndConfirmed}
             apiUrl={API_URL}
             loading={loading}
+            onOrderStatusChange={refetchOrders}
           />
           <AgentActivityLog events={agentActivityEvents} />
         </div>
