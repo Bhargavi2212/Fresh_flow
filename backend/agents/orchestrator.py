@@ -134,13 +134,20 @@ def _build_free_text_order_items(raw_message: str, customer_id: str) -> tuple[li
     text = raw_message.strip()
     if len(text) < 2:
         return None
-    # Extract quantity from start (e.g. "2 cases salmon" -> 2)
-    quantity = 1.0
-    num_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:cases?|lbs?|lb|pounds?|x|\*)?", text, re.IGNORECASE)
-    if num_match:
-        quantity = max(1.0, float(num_match.group(1)))
+    stopwords = {
+        "please", "pls", "thanks", "thank", "you", "need", "want", "order", "for", "me", "just", "the",
+    }
 
-    def try_query(query: str) -> tuple[list[dict], float, str] | None:
+    def _clean_phrase(phrase: str) -> str:
+        phrase = re.sub(r"\s+", " ", (phrase or "").strip())
+        phrase = re.sub(r"^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "", phrase)
+        if not phrase:
+            return ""
+        words = [w for w in phrase.split() if w.lower() not in stopwords]
+        return " ".join(words).strip()
+
+    def try_query(query: str, quantity: float = 1.0) -> tuple[dict, float] | None:
+        query = _clean_phrase(query)
         if not query or len(query) < 2:
             return None
         try:
@@ -153,34 +160,92 @@ def _build_free_text_order_items(raw_message: str, customer_id: str) -> tuple[li
             if not sku_id:
                 return None
             sim = float(best.get("similarity_score") or 0)
-            if sim < 0.25:
+            if sim < 0.35:
                 return None
             unit_price = float(best.get("unit_price") or 0)
             product_name = best.get("name") or sku_id
-            line_total = round(quantity * unit_price, 2)
-            order_items = [
+            qty = max(1.0, float(quantity or 1.0))
+            line_total = round(qty * unit_price, 2)
+            return (
                 {
                     "sku_id": sku_id,
                     "product_name": product_name,
-                    "quantity": quantity,
+                    "quantity": qty,
                     "unit_price": unit_price,
                     "line_total": line_total,
                     "confidence": round(sim, 2),
-                }
-            ]
-            return (order_items, line_total, "Parsed from free text (fallback)")
+                },
+                line_total,
+            )
         except Exception:
             return None
+
+    def _extract_candidates(message: str) -> list[tuple[str, float]]:
+        candidates: list[tuple[str, float]] = []
+        # Pattern like: "2 cases salmon", "3 shrimp", "1.5 lb cod"
+        pattern = re.compile(
+            r"(?P<qty>\d+(?:\.\d+)?)\s*(?:cases?|lbs?|lb|pounds?|x|\*)?\s+(?P<name>[a-zA-Z][^,;\n]+?)(?=(?:\s*(?:,|;|\band\b|&)\s*)|$)",
+            re.IGNORECASE,
+        )
+        for m in pattern.finditer(message):
+            name = _clean_phrase(m.group("name"))
+            if not name:
+                continue
+            qty = max(1.0, float(m.group("qty")))
+            candidates.append((name, qty))
+
+        if candidates:
+            return candidates
+
+        parts = re.split(r"(?:,|;|\band\b|\n|&)", message, flags=re.IGNORECASE)
+        for p in parts:
+            p = (p or "").strip()
+            if not p:
+                continue
+            qty = 1.0
+            m = re.match(r"^(\d+(?:\.\d+)?)\s*(?:cases?|lbs?|lb|pounds?|x|\*)?\s+(.*)$", p, re.IGNORECASE)
+            if m:
+                qty = max(1.0, float(m.group(1)))
+                p = m.group(2)
+            name = _clean_phrase(p)
+            if name:
+                candidates.append((name, qty))
+        return candidates[:8]
+
+    order_items: list[dict] = []
+    total = 0.0
+    by_sku: dict[str, int] = {}
+    for candidate, qty in _extract_candidates(text):
+        resolved = try_query(candidate, qty)
+        if not resolved:
+            continue
+        item, line_total = resolved
+        sku = item["sku_id"]
+        existing_idx = by_sku.get(sku)
+        if existing_idx is not None:
+            existing = order_items[existing_idx]
+            existing["quantity"] = round(float(existing.get("quantity") or 0) + float(item.get("quantity") or 0), 3)
+            existing["line_total"] = round(float(existing.get("line_total") or 0) + line_total, 2)
+            existing["confidence"] = max(float(existing.get("confidence") or 0), float(item.get("confidence") or 0))
+        else:
+            by_sku[sku] = len(order_items)
+            order_items.append(item)
+        total = round(total + line_total, 2)
+
+    if order_items:
+        return (order_items, total, "Parsed from free text (fallback)")
 
     # Try full message first, then product-only (strip leading numbers and unit words)
     out = try_query(text)
     if out is not None:
-        return out
+        item, line_total = out
+        return ([item], line_total, "Parsed from free text (fallback)")
     product_part = re.sub(r"\b\d+(?:\.\d+)?\s*(?:cases?|lbs?|lb|pounds?|x|\*)?\s*", "", text, flags=re.IGNORECASE).strip()
     if product_part and product_part != text:
         out = try_query(product_part)
         if out is not None:
-            return out
+            item, line_total = out
+            return ([item], line_total, "Parsed from free text (fallback)")
     return None
 
 
