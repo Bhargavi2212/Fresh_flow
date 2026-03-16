@@ -10,6 +10,7 @@ import boto3
 
 from backend.agents.output_parser import parse_agent_json
 from backend.config import get_settings
+from backend.services.product_retrieval import retrieve_products
 from backend.tools import get_customer_history, get_customer_preferences, get_usual_order, search_products
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ def _run_tool(name: str, input_obj: dict, customer_id: str) -> str:
             query = (input_obj.get("query") or "").strip()
             top_k = int(input_obj.get("top_k", 5))
             category = input_obj.get("category")
-            return search_products(query=query, top_k=top_k, category=category)
+            return search_products(query=query, top_k=top_k, category=category, customer_id=customer_id)
         if name == "get_usual_order":
             return get_usual_order(customer_id=customer_id)
         if name == "get_customer_history":
@@ -140,6 +141,36 @@ def _extract_text_from_message(content: list[dict]) -> str | None:
 def _has_tool_use(content: list[dict]) -> bool:
     return any("toolUse" in block for block in (content or []))
 
+
+
+
+def _apply_retrieval_scores(parsed: dict, customer_id: str) -> dict:
+    """Re-rank candidates per line item and persist confidence + score components."""
+    items = parsed.get("order_items") or []
+    if not isinstance(items, list):
+        return parsed
+    for it in items:
+        query = (it.get("raw_text") or it.get("product_name") or it.get("sku_id") or "").strip()
+        if not query:
+            continue
+        candidates = retrieve_products(query_text=query, customer_id=customer_id, top_k=5)
+        if not candidates:
+            continue
+        current_sku = (it.get("sku_id") or "").strip()
+        selected = next((c for c in candidates if c.get("sku_id") == current_sku), candidates[0])
+        if not current_sku and selected.get("final_score", 0) >= 0.5:
+            it["sku_id"] = selected.get("sku_id")
+            it["product_name"] = selected.get("name")
+
+        it["retrieval_scores"] = {
+            "semantic_score": selected.get("semantic_score", 0),
+            "exact_token_overlap": selected.get("exact_token_overlap", 0),
+            "customer_history_boost": selected.get("customer_history_boost", 0),
+            "final_score": selected.get("final_score", 0),
+        }
+        it["confidence"] = round(float(selected.get("final_score") or 0), 2)
+
+    return parsed
 
 def parse_order(raw_text: str, customer_id: str) -> dict:
     """
@@ -227,7 +258,7 @@ def parse_order(raw_text: str, customer_id: str) -> dict:
                     len(order_items),
                     list(obj.keys()) if isinstance(obj, dict) else None,
                 )
-                return obj
+                return _apply_retrieval_scores(obj, customer_id)
             except ValueError as e:
                 logger.warning("order_intake_converse: parse failed on accumulated text (round %s): %s", round_num, e)
                 # Don't give up yet — ask model to produce JSON explicitly without tools
@@ -283,7 +314,7 @@ def parse_order(raw_text: str, customer_id: str) -> dict:
                     "order_intake_converse: retry parse succeeded, order_items_count=%s",
                     len(order_items),
                 )
-                return obj
+                return _apply_retrieval_scores(obj, customer_id)
             except ValueError:
                 continue
 
