@@ -2,7 +2,7 @@
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Product(BaseModel):
@@ -126,6 +126,7 @@ class IngestWebRequest(BaseModel):
     customer_id: str
     message: str
     channel: str = "web"
+    clarification_choices: dict[str, str] = Field(default_factory=dict)
 
 
 class IngestWebResponse(BaseModel):
@@ -134,6 +135,7 @@ class IngestWebResponse(BaseModel):
     parsed_items: list[Any]
     procurement_signals: list[Any]
     customer_insights: list[Any]
+    unresolved_mentions: list[Any] = Field(default_factory=list)
     total_amount: Decimal | None
     confidence_score: float | None
     message: str | None = None

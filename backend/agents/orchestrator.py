@@ -270,6 +270,7 @@ def run_orchestrator(
     customer_id: str,
     channel: str,
     customer_phone: str = "",
+    clarification_choices: dict | None = None,
 ) -> tuple[object, dict | None]:
     """
     Run the full order pipeline in code: no LLM for routing. Each step is a Python call
@@ -305,6 +306,8 @@ def run_orchestrator(
                 "items_needing_review": [],
                 "parsing_notes": parsing_notes,
             }
+
+    clarification_choices = clarification_choices or {}
 
     # --- Step 1: Parse order (unless fast path filled parse_result) ---
     t0 = time.perf_counter()
@@ -421,13 +424,119 @@ def run_orchestrator(
     _broadcast(order_id, "order_intake", "completed", "Parsed", int((time.perf_counter() - t0) * 1000))
 
     order_items = parse_result.get("order_items") or []
+    total_amount = float(parse_result.get("total_amount") or 0)
+    raw_unresolved_mentions = parse_result.get("unresolved_mentions") or parse_result.get("items_needing_review") or []
+
+    def _build_unresolved_mentions(items: list[dict], unresolved_source: list) -> list[dict]:
+        mentions: list[str] = []
+        for m in unresolved_source:
+            if isinstance(m, str) and m.strip():
+                mentions.append(m.strip())
+            elif isinstance(m, dict):
+                phrase = (m.get("phrase") or m.get("mention") or m.get("text") or "").strip()
+                if phrase:
+                    mentions.append(phrase)
+        for it in items:
+            conf = it.get("confidence")
+            product_label = (it.get("raw_text") or it.get("product_name") or "").strip()
+            if product_label and conf is not None and float(conf) < 0.8:
+                mentions.append(product_label)
+        deduped: list[str] = []
+        for m in mentions:
+            if m not in deduped:
+                deduped.append(m)
+
+        unresolved_out = []
+        for phrase in deduped[:8]:
+            candidates = []
+            try:
+                search_raw = search_products(query=phrase, top_k=3)
+                parsed = json.loads(search_raw) if isinstance(search_raw, str) else search_raw
+                if isinstance(parsed, list):
+                    for c in parsed[:3]:
+                        candidates.append({
+                            "sku_id": c.get("sku_id"),
+                            "name": c.get("name"),
+                            "unit_price": c.get("unit_price"),
+                            "similarity_score": c.get("similarity_score"),
+                        })
+            except Exception:
+                pass
+            unresolved_out.append({
+                "phrase": phrase,
+                "top_candidates": candidates,
+                "selected_sku_id": (clarification_choices.get(phrase) or "").strip() or None,
+            })
+        return unresolved_out
+
+    unresolved_mentions = _build_unresolved_mentions(order_items, raw_unresolved_mentions)
+
+    if unresolved_mentions:
+        all_explicitly_confirmed = all(bool((clarification_choices.get(m.get("phrase") or "") or "").strip()) for m in unresolved_mentions)
+        if not all_explicitly_confirmed:
+            _broadcast(order_id, "order_intake", "needs_review", "Awaiting customer SKU confirmation", int((time.perf_counter() - t0) * 1000))
+            summary = {
+                "order_id": "",
+                "status": "awaiting_customer_confirmation",
+                "customer_name": customer_name,
+                "channel": channel or "web",
+                "item_count": len(order_items),
+                "total_amount": total_amount,
+                "items_confirmed": 0,
+                "items_needing_review": len(unresolved_mentions),
+                "substitutions_made": 0,
+                "purchase_orders_generated": 0,
+                "confirmation_sent": False,
+                "parsed_items": order_items,
+                "unresolved_mentions": unresolved_mentions,
+                "message": "Please confirm the unresolved items before we place your order.",
+            }
+            return None, summary
+
+        # Apply explicit user choices before downstream inventory/save.
+        for mention in unresolved_mentions:
+            phrase = mention.get("phrase") or ""
+            chosen_sku = (clarification_choices.get(phrase) or "").strip()
+            if not chosen_sku:
+                continue
+            product_row = fetch_one_sync(
+                "SELECT sku_id, name, unit_price FROM products WHERE sku_id = $1 AND status = 'active'",
+                chosen_sku,
+            )
+            if not product_row:
+                continue
+            patched = False
+            for it in order_items:
+                label = (it.get("raw_text") or it.get("product_name") or "").lower()
+                if phrase.lower() in label and (it.get("confidence") is None or float(it.get("confidence") or 0) < 0.9):
+                    qty = float(it.get("quantity") or 1)
+                    unit_price = float(product_row.get("unit_price") or 0)
+                    it["sku_id"] = product_row["sku_id"]
+                    it["product_name"] = product_row["name"]
+                    it["unit_price"] = unit_price
+                    it["line_total"] = round(qty * unit_price, 2)
+                    it["confidence"] = max(0.9, float(it.get("confidence") or 0))
+                    it["notes"] = f"Customer confirmed SKU for '{phrase}'"
+                    patched = True
+                    break
+            if not patched:
+                unit_price = float(product_row.get("unit_price") or 0)
+                order_items.append({
+                    "sku_id": product_row["sku_id"],
+                    "product_name": product_row["name"],
+                    "quantity": 1,
+                    "unit_price": unit_price,
+                    "line_total": round(unit_price, 2),
+                    "confidence": 0.9,
+                    "notes": f"Customer confirmed SKU for '{phrase}'",
+                })
+
     logger.info(
         "order_writer: parse_result order_items_count=%s has_error=%s parsing_notes=%s",
         len(order_items),
         bool(parse_result.get("error")),
         (parse_result.get("parsing_notes") or "")[:200],
     )
-    total_amount = float(parse_result.get("total_amount") or 0)
     # Fallback: if parse returned 0 items but message suggests "usual" or "last order", try usual/last
     if not order_items and _normalized_message_is_usual(raw_message):
         built = _build_usual_or_last_order_items(customer_id)
@@ -656,5 +765,6 @@ def run_orchestrator(
         "purchase_orders_generated": purchase_orders_generated,
         "confirmation_sent": confirmation_sent,
         "parsed_items": checked_items,
+        "unresolved_mentions": [],
     }
     return None, summary
