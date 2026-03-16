@@ -167,15 +167,17 @@ async def ingest_web(body: IngestWebRequest):
     if confidence_score is None:
         confidence_score = 1.0
 
-    # Optionally fetch order to get parsed_items and procurement_signals from agent_trace
-    parsed_items = []
+    parsed_items = summary.get("parsed_items")
+    if parsed_items is None:
+        parsed_items = []
+    elif not isinstance(parsed_items, list):
+        parsed_items = []
+
     procurement_signals = []
     if order_id:
         order_row = await fetch_one("SELECT agent_trace FROM orders WHERE order_id = $1", order_id)
         if order_row and order_row.get("agent_trace"):
             trace = order_row["agent_trace"] or {}
-            order_intake = trace.get("order_intake") or {}
-            parsed_items = order_intake.get("order_items") or order_intake.get("orderItems") or []
             inv = trace.get("inventory") or {}
             procurement_signals = inv.get("procurement_signals") or inv.get("procurementSignals") or []
 

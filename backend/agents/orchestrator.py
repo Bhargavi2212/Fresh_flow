@@ -201,6 +201,7 @@ def run_orchestrator(
             "substitutions_made": 0,
             "purchase_orders_generated": purchase_orders_generated,
             "confirmation_sent": False,
+            "parsed_items": [],
         }
         return None, summary
     try:
@@ -221,6 +222,7 @@ def run_orchestrator(
             "substitutions_made": 0,
             "purchase_orders_generated": purchase_orders_generated,
             "confirmation_sent": False,
+            "parsed_items": checked_items,
         }
         return None, summary
     _broadcast(order_id, "order_writer", "completed", f"Saved {order_id}", int((time.perf_counter() - t3) * 1000))
@@ -284,5 +286,6 @@ def run_orchestrator(
         "substitutions_made": substitutions_made,
         "purchase_orders_generated": purchase_orders_generated,
         "confirmation_sent": confirmation_sent,
+        "parsed_items": checked_items,
     }
     return None, summary

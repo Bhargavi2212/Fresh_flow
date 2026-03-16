@@ -32,6 +32,9 @@ export default function OrderDetail({ order, itemCount, totalAmount }) {
             {items.map((it, i) => (
               <li key={i} className="flex flex-wrap gap-x-2 gap-y-0.5">
                 <span className="font-mono">{it.sku_id}</span>
+                {(it.product_name ?? it.name ?? it.raw_text) && (
+                  <span className="text-gray-600 ml-1">({it.product_name ?? it.name ?? it.raw_text})</span>
+                )}
                 <span>×{Number(it.quantity)}</span>
                 {it.match_confidence != null && (
                   <span className={confidenceClass(it.match_confidence)}>
