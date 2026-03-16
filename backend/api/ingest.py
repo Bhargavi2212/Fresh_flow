@@ -144,6 +144,7 @@ async def ingest_web(body: IngestWebRequest):
                 body.customer_id,
                 body.channel,
                 customer_phone="",
+                clarification_choices=body.clarification_choices or {},
             ),
             timeout=60.0,
         )
@@ -182,6 +183,9 @@ async def ingest_web(body: IngestWebRequest):
             procurement_signals = inv.get("procurement_signals") or inv.get("procurementSignals") or []
 
     message = summary.get("message")
+    unresolved_mentions = summary.get("unresolved_mentions") or []
+    if not isinstance(unresolved_mentions, list):
+        unresolved_mentions = []
 
     return IngestWebResponse(
         order_id=order_id,
@@ -189,6 +193,7 @@ async def ingest_web(body: IngestWebRequest):
         parsed_items=parsed_items,
         procurement_signals=procurement_signals,
         customer_insights=[],
+        unresolved_mentions=unresolved_mentions,
         total_amount=total_amount,
         confidence_score=float(confidence_score),
         message=message,

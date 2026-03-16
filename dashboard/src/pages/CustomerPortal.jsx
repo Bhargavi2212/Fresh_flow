@@ -33,6 +33,8 @@ export default function CustomerPortal() {
   const [loadingCustomer, setLoadingCustomer] = useState(true);
   const [expandedOrderId, setExpandedOrderId] = useState(null);
   const [orderDetails, setOrderDetails] = useState({});
+  const [pendingClarification, setPendingClarification] = useState(null);
+  const [clarificationChoices, setClarificationChoices] = useState({});
 
   useEffect(() => {
     if (!customerId) {
@@ -107,12 +109,14 @@ export default function CustomerPortal() {
     });
   }, [events, submitTimestamp, orderResponse?.order_id]);
 
-  const handleSubmit = async (message) => {
+  const handleSubmit = async (message, choices = {}) => {
     setOrderState('processing');
     setSubmitTimestamp(Date.now());
     setOrderResponse(null);
     setErrorMessage(null);
     setPrefillMessage('');
+    setPendingClarification(null);
+    setClarificationChoices({});
     try {
       const res = await fetch(`${API_URL}/api/ingest/web`, {
         method: 'POST',
@@ -121,6 +125,7 @@ export default function CustomerPortal() {
           customer_id: customerId,
           message,
           channel: 'web',
+          clarification_choices: choices,
         }),
       });
       const errBody = await res.json().catch(() => ({}));
@@ -138,13 +143,17 @@ export default function CustomerPortal() {
       }
       setOrderResponse(errBody);
       setOrderState('done');
-      setPrefillMessage(''); // clear textarea after successful confirmation
-      // Refetch recent orders so "Last order" and list stay in sync
-      if (customerId) {
-        fetch(`${API_URL}/api/orders?customer_id=${customerId}&limit=10`)
-          .then((r) => r.json())
-          .then((d) => setRecentOrders(d?.data ?? []))
-          .catch(() => {});
+      if (errBody?.status === 'awaiting_customer_confirmation' && Array.isArray(errBody?.unresolved_mentions) && errBody.unresolved_mentions.length > 0) {
+        setPendingClarification({ message, unresolved_mentions: errBody.unresolved_mentions });
+      } else {
+        setPrefillMessage(''); // clear textarea after successful confirmation
+        // Refetch recent orders so "Last order" and list stay in sync
+        if (customerId) {
+          fetch(`${API_URL}/api/orders?customer_id=${customerId}&limit=10`)
+            .then((r) => r.json())
+            .then((d) => setRecentOrders(d?.data ?? []))
+            .catch(() => {});
+        }
       }
     } catch (err) {
       setErrorMessage(err.message || 'Order failed');
@@ -157,6 +166,20 @@ export default function CustomerPortal() {
     setOrderResponse(null);
     setErrorMessage(null);
     setPrefillMessage('');
+    setPendingClarification(null);
+    setClarificationChoices({});
+  };
+
+
+
+  const canSubmitClarification = useMemo(() => {
+    if (!pendingClarification?.unresolved_mentions?.length) return false;
+    return pendingClarification.unresolved_mentions.every((m) => Boolean((clarificationChoices[m.phrase] || '').trim()));
+  }, [pendingClarification, clarificationChoices]);
+
+  const handleClarificationSubmit = () => {
+    if (!pendingClarification?.message || !canSubmitClarification || orderState === 'processing') return;
+    handleSubmit(pendingClarification.message, clarificationChoices);
   };
 
   const hasResolvedCustomer = customer !== undefined;
@@ -314,6 +337,45 @@ export default function CustomerPortal() {
               </li>
             ))}
           </ul>
+        </section>
+      )}
+
+
+
+      {pendingClarification?.unresolved_mentions?.length > 0 && (
+        <section className="mb-6 rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <h3 className="text-sm font-semibold text-amber-900 mb-2">Confirm items before placing order</h3>
+          <p className="text-sm text-amber-800 mb-3">We found ambiguous item mentions. Pick the correct SKU for each phrase.</p>
+          <div className="space-y-3">
+            {pendingClarification.unresolved_mentions.map((mention) => (
+              <div key={mention.phrase} className="rounded border border-amber-200 bg-white p-3">
+                <p className="text-sm text-gray-700 mb-2">
+                  <span className="font-medium">"{mention.phrase}"</span>
+                </p>
+                <select
+                  className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+                  value={clarificationChoices[mention.phrase] || ''}
+                  onChange={(e) => setClarificationChoices((prev) => ({ ...prev, [mention.phrase]: e.target.value }))}
+                  disabled={orderState === 'processing'}
+                >
+                  <option value="">Select matching SKU…</option>
+                  {(mention.top_candidates || []).map((c) => (
+                    <option key={`${mention.phrase}-${c.sku_id}`} value={c.sku_id}>
+                      {c.name || c.sku_id} ({c.sku_id})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={handleClarificationSubmit}
+            disabled={!canSubmitClarification || orderState === 'processing'}
+            className="mt-4 w-full rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+          >
+            Confirm selections and place order
+          </button>
         </section>
       )}
 
