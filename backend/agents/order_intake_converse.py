@@ -1,6 +1,6 @@
 """
-Order intake via Bedrock Converse API with native structured output (outputConfig).
-Guarantees valid JSON from the API — no prompt-based parsing or repair.
+Order intake via Bedrock Converse API (tools + system prompt).
+Final response is parsed with parse_agent_json (fences, last {...}, key validation).
 """
 import json
 import logging
@@ -8,6 +8,7 @@ from typing import Any
 
 import boto3
 
+from backend.agents.output_parser import parse_agent_json
 from backend.config import get_settings
 from backend.tools import get_customer_history, get_customer_preferences, get_usual_order, search_products
 
@@ -15,36 +16,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_ID = "us.amazon.nova-2-lite-v1:0"
 MAX_CONVERSE_ROUNDS = 15
-
-# JSON schema for Converse outputConfig — model response must match this (valid JSON guaranteed).
-ORDER_OUTPUT_SCHEMA = json.dumps({
-    "type": "object",
-    "properties": {
-        "customer_id": {"type": "string", "description": "Customer ID"},
-        "order_items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "sku_id": {"type": "string"},
-                    "product_name": {"type": "string"},
-                    "raw_text": {"type": "string"},
-                    "quantity": {"type": "number"},
-                    "unit_of_measure": {"type": "string"},
-                    "unit_price": {"type": "number"},
-                    "line_total": {"type": "number"},
-                    "confidence": {"type": "number"},
-                    "match_reasoning": {"type": "string"},
-                },
-                "required": ["sku_id", "product_name", "quantity", "unit_price", "line_total", "confidence"],
-            },
-        },
-        "total_amount": {"type": "number"},
-        "items_needing_review": {"type": "array", "items": {"type": "object"}},
-        "parsing_notes": {"type": "string"},
-    },
-    "required": ["customer_id", "order_items", "total_amount", "items_needing_review", "parsing_notes"],
-})
 
 SYSTEM_PROMPT = """You are an order parsing specialist for FreshFlow (seafood and produce distributor). Convert raw order messages into structured line items matched to real products.
 
@@ -154,11 +125,12 @@ def _run_tool(name: str, input_obj: dict, customer_id: str) -> str:
 
 
 def _extract_text_from_message(content: list[dict]) -> str | None:
-    """Get the first text block from assistant message content."""
+    """Concatenate all text blocks from assistant message content (order JSON may be in a later block)."""
+    parts = []
     for block in content or []:
         if "text" in block:
-            return block["text"]
-    return None
+            parts.append(block["text"])
+    return "\n".join(parts) if parts else None
 
 
 def _has_tool_use(content: list[dict]) -> bool:
@@ -192,19 +164,6 @@ def parse_order(raw_text: str, customer_id: str) -> dict:
             "guardrailIdentifier": settings.bedrock_guardrail_id,
             "guardrailVersion": settings.bedrock_guardrail_version or "DRAFT",
         }
-    # Structured output: response text will conform to ORDER_OUTPUT_SCHEMA (valid JSON).
-    request_kwargs["outputConfig"] = {
-        "textFormat": {
-            "type": "json_schema",
-            "structure": {
-                "jsonSchema": {
-                    "schema": ORDER_OUTPUT_SCHEMA,
-                    "name": "OrderParse",
-                    "description": "Parsed order with line items",
-                }
-            },
-        }
-    }
 
     for round_num in range(MAX_CONVERSE_ROUNDS):
         try:
@@ -235,25 +194,26 @@ def parse_order(raw_text: str, customer_id: str) -> dict:
                         tool_input = {}
                 result_text = _run_tool(tool_name, tool_input, customer_id)
                 tool_results.append({
-                    "toolUseId": tool_id,
-                    "content": [{"text": result_text}],
+                    "toolResult": {
+                        "toolUseId": tool_id,
+                        "content": [{"text": result_text}],
+                    }
                 })
             messages.append({"role": "user", "content": tool_results})
-            # Next request: same config but updated messages. Keep outputConfig so final turn is structured.
             request_kwargs["messages"] = messages
             continue
 
-        # No tool use: this is the final response (text only, schema-valid JSON).
+        # No tool use: this is the final response. Use parse_agent_json to strip fences, find last {...}, validate keys.
         text = _extract_text_from_message(content)
         if text and stop_reason != "tool_use":
             try:
-                obj = json.loads(text)
-            except json.JSONDecodeError as e:
-                return {"error": f"parse_order: invalid JSON: {e}", "agent_name": "parse_order"}
-            expected = ["customer_id", "order_items", "total_amount", "items_needing_review", "parsing_notes"]
-            missing = [k for k in expected if k not in obj]
-            if missing:
-                return {"error": f"parse_order: missing keys: {missing}", "agent_name": "parse_order"}
+                obj = parse_agent_json(
+                    text,
+                    ["customer_id", "order_items", "total_amount", "items_needing_review", "parsing_notes"],
+                    "parse_order",
+                )
+            except ValueError as e:
+                return {"error": str(e), "agent_name": "parse_order"}
             return obj
 
     return {"error": "parse_order: max Converse rounds exceeded", "agent_name": "parse_order"}

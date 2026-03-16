@@ -23,30 +23,34 @@ async def list_orders(
     conditions = ["1=1"]
     params: list = []
     if status:
-        conditions.append("status = $1")
+        conditions.append("o.status = $1")
         params.append(status)
     if channel:
         params.append(channel)
-        conditions.append(f"channel = ${len(params)}")
+        conditions.append(f"o.channel = ${len(params)}")
     if customer_id:
         params.append(customer_id)
-        conditions.append(f"customer_id = ${len(params)}")
+        conditions.append(f"o.customer_id = ${len(params)}")
     if created_after:
         params.append(created_after)
-        conditions.append(f"created_at >= ${len(params)}::timestamp")
+        conditions.append(f"o.created_at >= ${len(params)}::timestamp")
     if created_before:
         params.append(created_before)
-        conditions.append(f"created_at <= ${len(params)}::timestamp")
+        conditions.append(f"o.created_at <= ${len(params)}::timestamp")
 
     where = " AND ".join(conditions)
-    total_row = await fetch_one(f"SELECT COUNT(*)::int AS c FROM orders WHERE {where}", *params)
+    total_row = await fetch_one(f"SELECT COUNT(*)::int AS c FROM orders o WHERE {where}", *params)
     total = total_row["c"] if total_row else 0
 
     n = len(params)
     params.extend([limit, offset])
     rows = await fetch_all(
-        f"""SELECT order_id, customer_id, channel, raw_message, status, confidence_score, total_amount, created_at, confirmed_at
-            FROM orders WHERE {where} ORDER BY created_at DESC LIMIT ${n+1} OFFSET ${n+2}""",
+        f"""SELECT o.order_id, o.customer_id, c.name AS customer_name, o.channel, o.raw_message, o.status,
+                   o.confidence_score, o.total_amount, o.created_at, o.confirmed_at,
+                   (SELECT COUNT(*)::int FROM order_items WHERE order_id = o.order_id) AS item_count
+            FROM orders o
+            LEFT JOIN customers c ON c.customer_id = o.customer_id
+            WHERE {where} ORDER BY o.created_at DESC LIMIT ${n+1} OFFSET ${n+2}""",
         *params,
     )
     data = []
@@ -54,6 +58,7 @@ async def list_orders(
         data.append({
             "order_id": r["order_id"],
             "customer_id": r["customer_id"],
+            "customer_name": (r["customer_name"] or "").strip() or None,
             "channel": r["channel"],
             "raw_message": (r["raw_message"] or "")[:200],
             "status": r["status"],
@@ -61,6 +66,7 @@ async def list_orders(
             "total_amount": float(r["total_amount"]) if r.get("total_amount") is not None else None,
             "created_at": r["created_at"],
             "confirmed_at": r["confirmed_at"],
+            "item_count": r["item_count"] if r.get("item_count") is not None else 0,
         })
     return {"data": data, "meta": PaginationMeta(total=total, limit=limit, offset=offset)}
 

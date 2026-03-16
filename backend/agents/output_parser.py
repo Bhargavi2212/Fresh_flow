@@ -1,4 +1,5 @@
 """Structured output validation for agent responses: strip markdown, parse JSON, validate keys."""
+import ast
 import json
 import re
 import logging
@@ -25,6 +26,41 @@ def _find_last_json_object(text: str) -> str | None:
     return None
 
 
+def _find_all_json_objects(text: str) -> list[str]:
+    """Find all complete {...} JSON objects in text (left to right, by brace matching)."""
+    out = []
+    i = 0
+    while i < len(text):
+        start = text.find("{", i)
+        if start == -1:
+            break
+        depth = 0
+        end = -1
+        for j in range(start, len(text)):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end >= 0:
+            out.append(text[start : end + 1])
+            i = end + 1
+        else:
+            i = start + 1
+    return out
+
+
+def _normalize_json_string(raw: str) -> str:
+    """Fix common model output: BOM, single-quoted keys (Nova sometimes returns these despite outputConfig)."""
+    raw = raw.strip()
+    if raw.startswith("\ufeff"):
+        raw = raw[1:]
+    raw = re.sub(r"(\{|\,\s*)'([^']*)'\s*:", r'\1"\2":', raw)
+    return raw
+
+
 def _extract_text_from_agent_result(result) -> str:
     """Extract raw text from a Strands agent invoke result."""
     if hasattr(result, "message") and result.message:
@@ -43,32 +79,76 @@ def _extract_text_from_agent_result(result) -> str:
     return str(result)
 
 
+def _snake_to_camel(s: str) -> str:
+    parts = s.split("_")
+    return parts[0].lower() + "".join(p.capitalize() for p in parts[1:])
+
+
+def _normalize_obj_keys(obj: dict, expected_keys: list[str]) -> dict:
+    """Unwrap single-key wrappers and map camelCase to snake_case for expected_keys."""
+    # Unwrap if model returned e.g. {"data": {...}} or {"order": {...}}
+    for wrapper in ("data", "order", "result", "output", "body"):
+        if wrapper in obj and isinstance(obj.get(wrapper), dict):
+            inner = obj[wrapper]
+            if any(k in inner or _snake_to_camel(k) in inner for k in expected_keys):
+                obj = inner
+                break
+    # Accept camelCase equivalents (e.g. orderItems -> order_items)
+    for key in expected_keys:
+        if key not in obj:
+            camel = _snake_to_camel(key)
+            if camel in obj:
+                obj[key] = obj[camel]
+    return obj
+
+
+def _count_matching_keys(obj: dict, expected_keys: list[str]) -> int:
+    """After _normalize_obj_keys, count how many expected_keys are in obj."""
+    return sum(1 for k in expected_keys if k in obj)
+
+
 def parse_agent_json(raw_output: str, expected_keys: list[str], agent_name: str) -> dict:
     """
-    Strip markdown fences, find last JSON object via regex, parse, validate expected keys.
+    Strip markdown fences, find JSON object(s), parse, validate expected keys.
+    If multiple {...} exist, picks the one with the most expected keys (so the order
+    object is chosen over trailing {"status": "done"} etc.).
     Raises ValueError if invalid or missing keys.
     """
     if not raw_output or not isinstance(raw_output, str):
         raise ValueError(f"{agent_name}: empty or non-string output")
 
     text = raw_output.strip()
-    # Strip markdown code fences
     m = MARKDOWN_FENCE_RE.search(text)
     if m:
         text = m.group(1).strip()
-    raw = _find_last_json_object(text)
-    if not raw:
+    # Try all JSON objects and pick the one that has the most expected keys
+    all_raw = _find_all_json_objects(text)
+    if not all_raw:
         raise ValueError(f"{agent_name}: no JSON object found in output")
-    try:
-        obj = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"{agent_name}: invalid JSON: {e}") from e
-    if not isinstance(obj, dict):
-        raise ValueError(f"{agent_name}: root is not a JSON object")
-    missing = [k for k in expected_keys if k not in obj]
+    best_obj = None
+    best_count = -1
+    for raw in all_raw:
+        raw = _normalize_json_string(raw)
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            try:
+                obj = ast.literal_eval(raw)
+            except (ValueError, SyntaxError):
+                continue
+        if not isinstance(obj, dict):
+            continue
+        obj = _normalize_obj_keys(obj, expected_keys)
+        count = _count_matching_keys(obj, expected_keys)
+        if count > best_count:
+            best_count = count
+            best_obj = obj
+    if best_obj is None:
+        raise ValueError(f"{agent_name}: invalid JSON in output")
+    missing = [k for k in expected_keys if k not in best_obj]
     if missing:
         raise ValueError(f"{agent_name}: missing keys: {missing}")
-    return obj
+    return best_obj
 
 
 def parse_agent_json_with_retry(

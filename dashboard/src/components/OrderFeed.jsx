@@ -98,10 +98,20 @@ export default function OrderFeed({ orders, wsOrderEvents, apiUrl, loading }) {
                 </span>
                 <span
                   className={`text-xs px-2 py-0.5 rounded ${
-                    o.status === 'confirmed' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'
+                    o.status === 'fulfilled' || o.status === 'confirmed'
+                      ? 'bg-green-100 text-green-800'
+                      : o.status === 'needs_review'
+                        ? 'bg-amber-100 text-amber-800'
+                        : 'bg-gray-100 text-gray-800'
                   }`}
                 >
-                  {o.status === 'confirmed' ? 'Confirmed' : o.status === 'needs_review' ? 'Needs Review' : o.status}
+                  {o.status === 'fulfilled'
+                    ? 'Fulfilled'
+                    : o.status === 'confirmed'
+                      ? 'Confirmed'
+                      : o.status === 'needs_review'
+                        ? 'Needs Review'
+                        : o.status}
                 </span>
                 <span className="text-gray-500">
                   {o.item_count ?? (o.items?.length) ?? '—'} items

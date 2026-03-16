@@ -187,6 +187,22 @@ def run_orchestrator(
     }
     t3 = time.perf_counter()
     _broadcast(order_id, "order_writer", "started", "Saving order", None)
+    if not checked_items:
+        _broadcast(ORDER_ID_PLACEHOLDER, "order_writer", "failed", "No items to save; skipping order", int((time.perf_counter() - t3) * 1000))
+        summary = {
+            "order_id": "",
+            "status": "needs_review",
+            "customer_name": customer_name,
+            "channel": channel or "web",
+            "item_count": 0,
+            "total_amount": total_amount,
+            "items_confirmed": 0,
+            "items_needing_review": 0,
+            "substitutions_made": 0,
+            "purchase_orders_generated": purchase_orders_generated,
+            "confirmation_sent": False,
+        }
+        return None, summary
     try:
         save_raw = save_confirmed_order(json.dumps(order_data, default=str))
         save_out = json.loads(save_raw) if isinstance(save_raw, str) else save_raw

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { useWebSocket } from '../hooks/useWebSocket.js';
 import OrderInput from '../components/OrderInput.jsx';
 import QuickReorder from '../components/QuickReorder.jsx';
@@ -8,11 +8,22 @@ import OrderConfirmation from '../components/OrderConfirmation.jsx';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001';
 
+function formatDateTime(value) {
+  try {
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '—';
+  }
+}
+
 export default function CustomerPortal() {
   const { customerId } = useParams();
   const { events, connected } = useWebSocket();
 
   const [customer, setCustomer] = useState(null);
+  const [customersList, setCustomersList] = useState([]);
   const [recentOrders, setRecentOrders] = useState([]);
   const [orderState, setOrderState] = useState('idle');
   const [orderResponse, setOrderResponse] = useState(null);
@@ -23,21 +34,39 @@ export default function CustomerPortal() {
 
   useEffect(() => {
     if (!customerId) {
+      setCustomer(undefined);
       setLoadingCustomer(false);
+      (async () => {
+        try {
+          const res = await fetch(`${API_URL}/api/customers?limit=100`);
+          const data = await res.json();
+          setCustomersList(data?.data ?? []);
+        } catch {
+          setCustomersList([]);
+        }
+      })();
       return;
     }
+    setCustomer(undefined);
+    setLoadingCustomer(true);
     let cancelled = false;
     (async () => {
-      setLoadingCustomer(true);
       try {
         const res = await fetch(`${API_URL}/api/customers/${customerId}`);
         if (cancelled) return;
-        if (res.status === 404) {
+        if (!res.ok) {
+          setCustomer(null);
+          return;
+        }
+        const contentType = res.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
           setCustomer(null);
           return;
         }
         const data = await res.json();
-        setCustomer(data?.data ?? data);
+        const c = data?.data ?? data;
+        if (!cancelled && c && typeof c === 'object' && (c.customer_id != null || c.name != null)) setCustomer(c);
+        else if (!cancelled) setCustomer(null);
       } catch (err) {
         if (!cancelled) setCustomer(null);
       } finally {
@@ -52,7 +81,7 @@ export default function CustomerPortal() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_URL}/api/orders?customer_id=${customerId}&limit=5`);
+        const res = await fetch(`${API_URL}/api/orders?customer_id=${customerId}&limit=10`);
         if (cancelled) return;
         const data = await res.json();
         setRecentOrders(data?.data ?? []);
@@ -108,6 +137,13 @@ export default function CustomerPortal() {
       setOrderResponse(errBody);
       setOrderState('done');
       setPrefillMessage(''); // clear textarea after successful confirmation
+      // Refetch recent orders so "Last order" and list stay in sync
+      if (customerId) {
+        fetch(`${API_URL}/api/orders?customer_id=${customerId}&limit=10`)
+          .then((r) => r.json())
+          .then((d) => setRecentOrders(d?.data ?? []))
+          .catch(() => {});
+      }
     } catch (err) {
       setErrorMessage(err.message || 'Order failed');
       setOrderState('error');
@@ -121,29 +157,78 @@ export default function CustomerPortal() {
     setPrefillMessage('');
   };
 
-  if (loadingCustomer) {
+  const hasResolvedCustomer = customer !== undefined;
+  const hasValidCustomer =
+    customer != null &&
+    typeof customer === 'object' &&
+    (customer.customer_id != null || customer.name != null);
+
+  if (customerId && (!hasResolvedCustomer || loadingCustomer)) {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center max-w-lg mx-auto">
-        <p className="text-gray-500">Loading...</p>
+      <div className="min-h-screen bg-white flex items-center justify-center max-w-lg mx-auto p-4">
+        <p className="text-gray-600">Loading customer...</p>
       </div>
     );
   }
 
-  if (!customerId || customer === null) {
+  if (!customerId) {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center max-w-lg mx-auto p-4">
-        <p className="text-center text-gray-700">
-          Customer not found. Contact your sales rep to get set up.
+      <div className="min-h-screen bg-white text-gray-900 max-w-lg mx-auto px-4 py-6">
+        <header className="mb-6">
+          <h1 className="text-xl font-semibold">FreshFlow 🐟</h1>
+          <p className="text-sm text-gray-500 mt-1">Select a customer to place an order</p>
+        </header>
+        <ul className="space-y-2">
+          {(customersList.length === 0 && !loadingCustomer) && (
+            <li className="text-gray-500 text-sm">No customers found.</li>
+          )}
+          {customersList.map((c) => (
+            <li key={c.customer_id}>
+              <Link
+                to={`/order/${c.customer_id}`}
+                className="block rounded-lg border border-gray-200 px-4 py-3 hover:bg-gray-50 hover:border-gray-300"
+              >
+                <span className="font-medium">{c.name || c.customer_id}</span>
+                <span className="text-gray-500 text-sm ml-2">
+                  {c.type ? c.type.replace(/_/g, ' ') : ''} · {c.customer_id}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-4 text-sm text-gray-500">
+          <Link to="/" className="text-blue-600 hover:underline">Back to Dashboard</Link>
         </p>
       </div>
     );
   }
 
-  const name = customer.name || 'there';
-  const type = customer.type || '';
-  const deliveryDays = Array.isArray(customer.delivery_days)
-    ? customer.delivery_days.join(', ')
-    : customer.delivery_days || '';
+  if (customerId && (customer == null || !hasValidCustomer)) {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center max-w-lg mx-auto p-4">
+        <p className="text-center text-gray-700">
+          Customer not found. <Link to="/order" className="text-blue-600 hover:underline">Select another customer</Link> or contact your sales rep.
+        </p>
+      </div>
+    );
+  }
+
+  if (!customer || typeof customer !== 'object') {
+    return (
+      <div className="min-h-screen bg-white flex items-center justify-center max-w-lg mx-auto p-4">
+        <p className="text-gray-600">Loading...</p>
+      </div>
+    );
+  }
+
+  const name = customer?.name ?? 'there';
+  const type = typeof customer?.type === 'string' ? customer.type : '';
+  let deliveryDays = '';
+  try {
+    const d = customer?.delivery_days;
+    if (Array.isArray(d)) deliveryDays = d.join(', ');
+    else if (d != null && typeof d === 'string') deliveryDays = d;
+  } catch (_) {}
 
   return (
     <div className="min-h-screen bg-white text-gray-900 max-w-lg mx-auto px-4 py-4">
@@ -154,6 +239,7 @@ export default function CustomerPortal() {
           <p className="text-sm text-gray-500">
             {type ? type.replace(/_/g, ' ') : ''} {deliveryDays ? `· Delivers ${deliveryDays}` : ''}
           </p>
+          <Link to="/order" className="text-xs text-blue-600 hover:underline mt-1 inline-block">Switch customer</Link>
         </div>
         <span
           className={`inline-flex items-center gap-1.5 text-sm ${connected ? 'text-green-600' : 'text-amber-600'}`}
@@ -172,6 +258,24 @@ export default function CustomerPortal() {
           apiUrl={API_URL}
         />
       </section>
+
+      {recentOrders.length > 0 && (
+        <section className="mb-6 rounded-lg border border-gray-200 bg-white overflow-hidden">
+          <h3 className="px-4 py-2 bg-gray-50 border-b border-gray-200 text-sm font-medium text-gray-700">Order history</h3>
+          <ul className="divide-y divide-gray-100">
+            {recentOrders.map((o) => (
+              <li key={o.order_id} className="px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-sm">
+                <span className="font-mono text-gray-600">{o.order_id}</span>
+                <span className="text-gray-500">{o.created_at ? formatDateTime(o.created_at) : '—'}</span>
+                <span className="font-medium">${o.total_amount != null ? Number(o.total_amount).toFixed(2) : '0.00'}</span>
+                <span className={`text-xs px-2 py-0.5 rounded ${o.status === 'fulfilled' || o.status === 'confirmed' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'}`}>
+                  {o.status === 'fulfilled' ? 'Fulfilled' : o.status === 'confirmed' ? 'Confirmed' : o.status}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="mb-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
         <OrderInput

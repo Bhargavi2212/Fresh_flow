@@ -23,35 +23,77 @@ export default function Dashboard() {
   const [purchaseOrders, setPurchaseOrders] = useState([]);
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [dateRange, setDateRange] = useState('7');
+  const [customStart, setCustomStart] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toISOString().slice(0, 10);
+  });
+  const [customEnd, setCustomEnd] = useState(() => new Date().toISOString().slice(0, 10));
 
   useEffect(() => {
     let cancelled = false;
     async function fetchInitial() {
       try {
-        const [statsRes, ordersRes, poRes, alertsRes] = await Promise.all([
+        const [statsRes, poRes, alertsRes] = await Promise.all([
           fetch(`${API_URL}/api/dashboard/stats`),
-          fetch(`${API_URL}/api/orders?limit=20`),
           fetch(`${API_URL}/api/purchase-orders?limit=10`),
           fetch(`${API_URL}/api/customer-alerts?limit=10`),
         ]);
         if (cancelled) return;
         const statsData = await statsRes.json();
         if (statsData?.data) setStats((s) => ({ ...s, ...statsData.data }));
-        const ordersData = await ordersRes.json();
-        if (ordersData?.data) setOrders(ordersData.data);
         const poData = await poRes.json();
         if (poData?.items) setPurchaseOrders(poData.items);
         const alertsData = await alertsRes.json();
         if (alertsData?.items) setAlerts(alertsData.items);
       } catch (err) {
         console.error('Initial fetch failed', err);
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     }
     fetchInitial();
     return () => { cancelled = true; };
   }, []);
+
+  const orderDateParams = useMemo(() => {
+    const now = new Date();
+    const toDate = (d) => d.toISOString().slice(0, 10);
+    if (dateRange === '7') {
+      const start = new Date(now);
+      start.setDate(start.getDate() - 7);
+      return { created_after: toDate(start), created_before: null };
+    }
+    if (dateRange === '30') {
+      const start = new Date(now);
+      start.setDate(start.getDate() - 30);
+      return { created_after: toDate(start), created_before: null };
+    }
+    return {
+      created_after: customStart || null,
+      created_before: customEnd || null,
+    };
+  }, [dateRange, customStart, customEnd]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    const { created_after, created_before } = orderDateParams;
+    const params = new URLSearchParams({ limit: '20' });
+    if (created_after) params.set('created_after', created_after);
+    if (created_before) params.set('created_before', created_before);
+    fetch(`${API_URL}/api/orders?${params}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled && data?.data) setOrders(data.data);
+      })
+      .catch((err) => {
+        if (!cancelled) console.error('Orders fetch failed', err);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [orderDateParams]);
 
   const lastAppliedCount = useRef(0);
   useEffect(() => {
@@ -66,6 +108,22 @@ export default function Dashboard() {
           orders_needing_review_today:
             ev.status === 'needs_review' ? s.orders_needing_review_today + 1 : s.orders_needing_review_today,
         }));
+        setOrders((prev) => {
+          if (prev.some((o) => o.order_id === ev.order_id)) return prev;
+          return [
+            {
+              order_id: ev.order_id,
+              customer_id: ev.customer_id ?? null,
+              customer_name: ev.customer_name ?? null,
+              channel: ev.channel ?? 'web',
+              status: ev.status ?? 'confirmed',
+              total_amount: ev.total_amount ?? null,
+              created_at: ev.timestamp ?? new Date().toISOString(),
+              item_count: ev.item_count ?? null,
+            },
+            ...prev,
+          ];
+        });
       } else if (ev.type === 'purchase_order_created') {
         setStats((s) => ({ ...s, purchase_orders_today: s.purchase_orders_today + 1 }));
       } else if (ev.type === 'customer_alert') {
@@ -97,7 +155,7 @@ export default function Dashboard() {
   );
 
   const now = new Date();
-  const dateTimeStr = now.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+  const dateTimeStr = now.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
@@ -131,6 +189,40 @@ export default function Dashboard() {
 
       <main className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4 max-w-[1600px] mx-auto">
         <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm font-medium text-gray-700">Order feed:</span>
+            <select
+              value={dateRange}
+              onChange={(e) => setDateRange(e.target.value)}
+              className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="7">Last 7 days</option>
+              <option value="30">Last 30 days</option>
+              <option value="custom">Custom range</option>
+            </select>
+            {dateRange === 'custom' && (
+              <>
+                <label className="flex items-center gap-1.5 text-sm text-gray-600">
+                  From
+                  <input
+                    type="date"
+                    value={customStart}
+                    onChange={(e) => setCustomStart(e.target.value)}
+                    className="rounded border border-gray-300 px-2 py-1 text-sm"
+                  />
+                </label>
+                <label className="flex items-center gap-1.5 text-sm text-gray-600">
+                  To
+                  <input
+                    type="date"
+                    value={customEnd}
+                    onChange={(e) => setCustomEnd(e.target.value)}
+                    className="rounded border border-gray-300 px-2 py-1 text-sm"
+                  />
+                </label>
+              </>
+            )}
+          </div>
           <OrderFeed
             orders={orders}
             wsOrderEvents={orderReceivedAndConfirmed}

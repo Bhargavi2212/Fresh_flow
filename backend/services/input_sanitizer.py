@@ -60,8 +60,8 @@ def validate_order_output(parsed_json: dict, customer_id: str) -> tuple[bool, st
     if total is not None:
         try:
             t = float(total)
-            if t < 0 or t == 0 or t > 50000:
-                return False, "total_amount out of range (0, 50000)"
+            if t < 0 or t > 50000:
+                return False, "total_amount out of range [0, 50000]"
         except (TypeError, ValueError):
             return False, "total_amount invalid"
 
