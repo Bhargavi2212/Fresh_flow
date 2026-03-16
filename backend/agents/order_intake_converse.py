@@ -17,10 +17,13 @@ logger = logging.getLogger(__name__)
 MODEL_ID = "us.amazon.nova-2-lite-v1:0"
 MAX_CONVERSE_ROUNDS = 15
 
+EXPECTED_KEYS = ["customer_id", "order_items", "total_amount", "items_needing_review", "parsing_notes"]
+
 SYSTEM_PROMPT = """You are an order parsing specialist for FreshFlow (seafood and produce distributor). Convert raw order messages into structured line items matched to real products.
 
 RULES:
-- You MUST call search_products for every product or ingredient mentioned (e.g. "salmon", "2 cases salmon", "shrimp", "lettuce"). Never output order_items without having called search_products first for each product.
+- You MUST call search_products for every product or ingredient mentioned (e.g. "salmon", "shrimp", "lettuce"). Never output order_items without having called search_products first for each product.
+- IMPORTANT: When calling search_products, pass ONLY the core product name (e.g. "salmon" or "shrimp"), NEVER include quantities or conversational words (no "2 cases", "please", "of", etc.).
 - If the customer says "the usual" or "same as last time", call get_usual_order(customer_id) and use those items with confidence 0.95.
 - Use get_customer_preferences for vague requests; use get_customer_history when helpful.
 - Handle corrections (e.g. "3 cases — actually 5" → quantity 5).
@@ -140,7 +143,7 @@ def _has_tool_use(content: list[dict]) -> bool:
 
 def parse_order(raw_text: str, customer_id: str) -> dict:
     """
-    Parse order using Bedrock Converse with outputConfig (JSON schema).
+    Parse order using Bedrock Converse with tools.
     Returns dict with customer_id, order_items, total_amount, items_needing_review, parsing_notes.
     On failure returns {"error": str, "agent_name": "parse_order"}.
     """
@@ -166,19 +169,28 @@ def parse_order(raw_text: str, customer_id: str) -> dict:
             "guardrailVersion": settings.bedrock_guardrail_version or "DRAFT",
         }
 
+    # Accumulate text from ALL rounds (including mixed tool_use+text responses)
+    accumulated_text_parts: list[str] = []
+
     for round_num in range(MAX_CONVERSE_ROUNDS):
         try:
             response = client.converse(**request_kwargs)
         except Exception as e:
-            logger.exception("Converse failed")
+            logger.exception("Converse failed round %s", round_num)
             return {"error": str(e), "agent_name": "parse_order"}
         output = response.get("output") or {}
         msg = output.get("message") or {}
         content = msg.get("content") or []
-        stop_reason = output.get("stopReason", "")
+        # stopReason is at top level of response, not inside output
+        stop_reason = response.get("stopReason", "")
+
+        # Always capture text blocks, even in rounds with tool_use
+        text_this_round = _extract_text_from_message(content)
+        if text_this_round:
+            accumulated_text_parts.append(text_this_round)
 
         if _has_tool_use(content):
-            # Append assistant message and tool results, then send again (no outputConfig for tool rounds).
+            # Append assistant message and tool results, then send again
             messages.append({"role": "assistant", "content": content})
             tool_results = []
             for block in content:
@@ -204,23 +216,76 @@ def parse_order(raw_text: str, customer_id: str) -> dict:
             request_kwargs["messages"] = messages
             continue
 
-        # No tool use: this is the final response. Use parse_agent_json to strip fences, find last {...}, validate keys.
-        text = _extract_text_from_message(content)
-        if text and stop_reason != "tool_use":
+        # No tool use in this round — try to parse JSON from accumulated text
+        all_text = "\n".join(accumulated_text_parts)
+        if all_text:
             try:
-                obj = parse_agent_json(
-                    text,
-                    ["customer_id", "order_items", "total_amount", "items_needing_review", "parsing_notes"],
-                    "parse_order",
-                )
+                obj = parse_agent_json(all_text, EXPECTED_KEYS, "parse_order")
                 order_items = obj.get("order_items") or []
                 logger.info(
                     "order_intake_converse: final parse order_items_count=%s keys=%s",
                     len(order_items),
                     list(obj.keys()) if isinstance(obj, dict) else None,
                 )
+                return obj
             except ValueError as e:
-                return {"error": str(e), "agent_name": "parse_order"}
-            return obj
+                logger.warning("order_intake_converse: parse failed on accumulated text (round %s): %s", round_num, e)
+                # Don't give up yet — ask model to produce JSON explicitly without tools
+                break
 
-    return {"error": "parse_order: max Converse rounds exceeded", "agent_name": "parse_order"}
+        # If no text at all, also break to retry
+        logger.warning("order_intake_converse: no text in final response (round %s)", round_num)
+        break
+
+    # --- RETRY: Ask model to produce JSON without tools ---
+    logger.info("order_intake_converse: retrying without tools to force JSON output")
+    retry_message = {
+        "role": "user",
+        "content": [{"text": (
+            "You have already searched the product catalog. Now produce ONLY the final JSON object with these exact keys: "
+            "customer_id, order_items, total_amount, items_needing_review, parsing_notes. "
+            "order_items must be an array of objects with: sku_id, product_name, quantity, unit_price, line_total, confidence. "
+            "Use the search results you already have. Output ONLY valid JSON, no markdown, no explanation."
+        )}],
+    }
+    messages.append(retry_message)
+
+    # Build retry request WITHOUT tools and WITHOUT reasoning to maximize chance of clean JSON
+    retry_kwargs: dict[str, Any] = {
+        "modelId": MODEL_ID,
+        "messages": messages,
+        "system": [{"text": SYSTEM_PROMPT}],
+        "inferenceConfig": {"maxTokens": 4096, "temperature": 0},
+    }
+    if settings.bedrock_guardrail_id:
+        retry_kwargs["guardrailConfig"] = {
+            "guardrailIdentifier": settings.bedrock_guardrail_id,
+            "guardrailVersion": settings.bedrock_guardrail_version or "DRAFT",
+        }
+
+    try:
+        response = client.converse(**retry_kwargs)
+    except Exception as e:
+        logger.exception("Converse retry failed")
+        return {"error": f"Retry failed: {e}", "agent_name": "parse_order"}
+
+    output = response.get("output") or {}
+    msg = output.get("message") or {}
+    content = msg.get("content") or []
+    retry_text = _extract_text_from_message(content)
+
+    if retry_text:
+        for candidate in [retry_text, "\n".join(accumulated_text_parts + [retry_text])]:
+            try:
+                obj = parse_agent_json(candidate, EXPECTED_KEYS, "parse_order")
+                order_items = obj.get("order_items") or []
+                logger.info(
+                    "order_intake_converse: retry parse succeeded, order_items_count=%s",
+                    len(order_items),
+                )
+                return obj
+            except ValueError:
+                continue
+
+    logger.error("order_intake_converse: all parse attempts failed")
+    return {"error": "parse_order: could not extract valid JSON after retry", "agent_name": "parse_order"}

@@ -176,7 +176,7 @@ def _build_free_text_order_items(raw_message: str, customer_id: str) -> tuple[li
     out = try_query(text)
     if out is not None:
         return out
-    product_part = re.sub(r"^\s*\d+(?:\.\d+)?\s*(?:cases?|lbs?|lb|pounds?|x|\*)\s*", "", text, flags=re.IGNORECASE).strip()
+    product_part = re.sub(r"\b\d+(?:\.\d+)?\s*(?:cases?|lbs?|lb|pounds?|x|\*)?\s*", "", text, flags=re.IGNORECASE).strip()
     if product_part and product_part != text:
         out = try_query(product_part)
         if out is not None:

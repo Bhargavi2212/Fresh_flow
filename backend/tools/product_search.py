@@ -62,20 +62,20 @@ def search_products(
 
     # Step 1 — Exact SKU
     if category:
-        q1 = f"SELECT {select_cols} FROM products WHERE sku_id = $1 AND status = 'active' AND category = $2"
+        q1 = f"SELECT {select_cols} FROM products WHERE sku_id = $1 AND LOWER(status) = 'active' AND category = $2"
         rows1 = fetch_all_sync(q1, query, category)
     else:
-        q1 = f"SELECT {select_cols} FROM products WHERE sku_id = $1 AND status = 'active'"
+        q1 = f"SELECT {select_cols} FROM products WHERE sku_id = $1 AND LOWER(status) = 'active'"
         rows1 = fetch_all_sync(q1, query)
     for r in rows1:
         all_results.append(_row_to_result(dict(r), 1.0))
 
     # Step 2 — Exact alias
     if category:
-        q2 = f"SELECT {select_cols} FROM products WHERE $1 = ANY(aliases) AND status = 'active' AND category = $2"
+        q2 = f"SELECT {select_cols} FROM products WHERE $1 = ANY(aliases) AND LOWER(status) = 'active' AND category = $2"
         rows2 = fetch_all_sync(q2, query, category)
     else:
-        q2 = f"SELECT {select_cols} FROM products WHERE $1 = ANY(aliases) AND status = 'active'"
+        q2 = f"SELECT {select_cols} FROM products WHERE $1 = ANY(aliases) AND LOWER(status) = 'active'"
         rows2 = fetch_all_sync(q2, query)
     for r in rows2:
         all_results.append(_row_to_result(dict(r), 0.99))
@@ -88,7 +88,7 @@ def search_products(
             WHERE EXISTS (
                 SELECT 1 FROM unnest(COALESCE(aliases, ARRAY[]::text[])) AS a
                 WHERE a ILIKE $1
-            ) AND status = 'active' AND category = $2
+            ) AND LOWER(status) = 'active' AND category = $2
         """
         rows3 = fetch_all_sync(q3, fuzzy_pattern, category)
     else:
@@ -97,7 +97,7 @@ def search_products(
             WHERE EXISTS (
                 SELECT 1 FROM unnest(COALESCE(aliases, ARRAY[]::text[])) AS a
                 WHERE a ILIKE $1
-            ) AND status = 'active'
+            ) AND LOWER(status) = 'active'
         """
         rows3 = fetch_all_sync(q3, fuzzy_pattern)
     for r in rows3:
@@ -115,7 +115,7 @@ def search_products(
         q4 = f"""
             SELECT {select_cols},
                    1 - (embedding <=> $1::vector) AS similarity_score
-            FROM products WHERE status = 'active' AND embedding IS NOT NULL AND category = $2
+            FROM products WHERE LOWER(status) = 'active' AND embedding IS NOT NULL AND category = $2
             ORDER BY embedding <=> $1::vector
             LIMIT $3
         """
@@ -124,7 +124,7 @@ def search_products(
         q4 = f"""
             SELECT {select_cols},
                    1 - (embedding <=> $1::vector) AS similarity_score
-            FROM products WHERE status = 'active' AND embedding IS NOT NULL
+            FROM products WHERE LOWER(status) = 'active' AND embedding IS NOT NULL
             ORDER BY embedding <=> $1::vector
             LIMIT $2
         """
