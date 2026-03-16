@@ -9,7 +9,9 @@ export default function OrderFeed({ orders, wsOrderEvents, apiUrl, loading }) {
   const [expandedId, setExpandedId] = useState(null);
   const [orderDetails, setOrderDetails] = useState({});
 
-  // Merge REST orders with WS events: show WS "order_received" / "order_confirmed" first, then REST
+  // Merge REST orders with WS events: show WS "order_received" / "order_confirmed" first, then REST.
+  // Hide "pending" placeholder when a confirmed order exists for same customer within 2 minutes.
+  const PENDING_HIDE_WINDOW_MS = 2 * 60 * 1000;
   const displayOrders = (() => {
     const byId = new Map();
     wsOrderEvents.forEach((ev) => {
@@ -43,7 +45,19 @@ export default function OrderFeed({ orders, wsOrderEvents, apiUrl, loading }) {
         byId.set(o.order_id, { ...o, fromWs: false });
       }
     });
-    return Array.from(byId.values()).sort((a, b) => {
+    const list = Array.from(byId.values());
+    const confirmed = list.filter((o) => o.order_id != null && String(o.order_id) !== 'pending');
+    const withoutDupPending = list.filter((o) => {
+      if (o.order_id != null && String(o.order_id) !== 'pending') return true;
+      const pendingTime = o.created_at ? new Date(o.created_at).getTime() : 0;
+      const hasMatchingConfirmed = confirmed.some(
+        (c) =>
+          c.customer_name === o.customer_name &&
+          Math.abs((c.created_at ? new Date(c.created_at).getTime() : 0) - pendingTime) <= PENDING_HIDE_WINDOW_MS
+      );
+      return !hasMatchingConfirmed;
+    });
+    return withoutDupPending.sort((a, b) => {
       const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
       const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
       return tb - ta;

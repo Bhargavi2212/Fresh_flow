@@ -136,6 +136,7 @@ class IngestWebResponse(BaseModel):
     customer_insights: list[Any]
     total_amount: Decimal | None
     confidence_score: float | None
+    message: str | None = None
 
 
 # --- Orders (Phase 2) ---

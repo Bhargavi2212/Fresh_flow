@@ -31,6 +31,8 @@ export default function CustomerPortal() {
   const [errorMessage, setErrorMessage] = useState(null);
   const [prefillMessage, setPrefillMessage] = useState('');
   const [loadingCustomer, setLoadingCustomer] = useState(true);
+  const [expandedOrderId, setExpandedOrderId] = useState(null);
+  const [orderDetails, setOrderDetails] = useState({});
 
   useEffect(() => {
     if (!customerId) {
@@ -264,13 +266,51 @@ export default function CustomerPortal() {
           <h3 className="px-4 py-2 bg-gray-50 border-b border-gray-200 text-sm font-medium text-gray-700">Order history</h3>
           <ul className="divide-y divide-gray-100">
             {recentOrders.map((o) => (
-              <li key={o.order_id} className="px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-sm">
-                <span className="font-mono text-gray-600">{o.order_id}</span>
-                <span className="text-gray-500">{o.created_at ? formatDateTime(o.created_at) : '—'}</span>
-                <span className="font-medium">${o.total_amount != null ? Number(o.total_amount).toFixed(2) : '0.00'}</span>
-                <span className={`text-xs px-2 py-0.5 rounded ${o.status === 'fulfilled' || o.status === 'confirmed' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'}`}>
-                  {o.status === 'fulfilled' ? 'Fulfilled' : o.status === 'confirmed' ? 'Confirmed' : o.status}
-                </span>
+              <li key={o.order_id} className="border-b border-gray-100 last:border-b-0">
+                <button
+                  type="button"
+                  className="w-full px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-sm text-left hover:bg-gray-50"
+                  onClick={() => {
+                    const next = expandedOrderId === o.order_id ? null : o.order_id;
+                    setExpandedOrderId(next);
+                    if (next && !orderDetails[next]) {
+                      fetch(`${API_URL}/api/orders/${next}`)
+                        .then((r) => r.json())
+                        .then((data) => {
+                          if (data?.data) setOrderDetails((prev) => ({ ...prev, [next]: data.data }));
+                        })
+                        .catch(() => {});
+                    }
+                  }}
+                >
+                  <span className="font-mono text-gray-600">{o.order_id}</span>
+                  <span className="text-gray-500">{o.created_at ? formatDateTime(o.created_at) : '—'}</span>
+                  <span className="font-medium">${o.total_amount != null ? Number(o.total_amount).toFixed(2) : '0.00'}</span>
+                  <span className={`text-xs px-2 py-0.5 rounded ${o.status === 'fulfilled' || o.status === 'confirmed' ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-800'}`}>
+                    {o.status === 'fulfilled' ? 'Fulfilled' : o.status === 'confirmed' ? 'Confirmed' : o.status}
+                  </span>
+                  <span className="text-gray-400">{expandedOrderId === o.order_id ? '▼' : '▶'}</span>
+                </button>
+                {expandedOrderId === o.order_id && (
+                  <div className="px-4 pb-3 pt-0 bg-gray-50 border-t border-gray-100">
+                    {orderDetails[o.order_id]?.items?.length > 0 ? (
+                      <ul className="text-sm text-gray-700 space-y-1">
+                        {orderDetails[o.order_id].items.map((it, i) => (
+                          <li key={i} className="flex flex-wrap gap-x-2 gap-y-0.5">
+                            <span className="font-mono text-gray-600">{it.sku_id}</span>
+                            {(it.product_name ?? it.raw_text) && <span className="text-gray-600">({it.product_name ?? it.raw_text})</span>}
+                            <span>×{Number(it.quantity)}</span>
+                            {it.line_total != null && <span className="text-gray-500">${Number(it.line_total).toFixed(2)}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : !orderDetails[o.order_id] ? (
+                      <p className="text-sm text-gray-500">Loading items…</p>
+                    ) : (
+                      <p className="text-sm text-gray-500">No line items.</p>
+                    )}
+                  </div>
+                )}
               </li>
             ))}
           </ul>

@@ -78,7 +78,7 @@ export default function Dashboard() {
     let cancelled = false;
     setLoading(true);
     const { created_after, created_before } = orderDateParams;
-    const params = new URLSearchParams({ limit: '20' });
+    const params = new URLSearchParams({ limit: '100' });
     if (created_after) params.set('created_after', created_after);
     if (created_before) params.set('created_before', created_before);
     fetch(`${API_URL}/api/orders?${params}`)

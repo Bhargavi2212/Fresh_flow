@@ -147,7 +147,7 @@ def get_customer_preferences(customer_id: str) -> str:
 @tool
 def get_usual_order(customer_id: str) -> str:
     """
-    Get the customer's "usual" order: items that appear in 40%+ of their orders over the last 90 days,
+    Get the customer's "usual" order: items that appear in 30%+ of their orders over the last 90 days,
     with median quantity per item. Use when the customer says "the usual" or "my regular order".
     Return items sorted by frequency (most often ordered first). Use these items directly with confidence 0.95.
 
@@ -182,8 +182,8 @@ def get_usual_order(customer_id: str) -> str:
                 sku_quantities[sku] = []
             sku_quantities[sku].append(qty)
 
-    # Include only items in >= 40% of orders; median quantity; sort by frequency desc
-    threshold = max(1, int(0.4 * total_orders))
+    # Include only items in >= 30% of orders; median quantity; sort by frequency desc
+    threshold = max(1, int(0.3 * total_orders))
     result_items = []
     for sku_id, quantities in sku_quantities.items():
         order_count = len(quantities)

@@ -1,7 +1,11 @@
 """Code-driven order pipeline: parse → inventory → status → procure (if needed) → save → confirm → customer intel."""
 import json
+import logging
+import re
 import time
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 from backend.agents.order_intake import parse_order
 from backend.agents.inventory_agent import check_order_inventory
@@ -9,12 +13,175 @@ from backend.agents.procurement import generate_purchase_orders
 from backend.agents.customer_intel import analyze_customer_order
 from backend.tools.order_writer import save_confirmed_order, append_order_trace
 from backend.tools.sms_sender import send_order_confirmation
+from backend.tools.customer_lookup import get_usual_order
+from backend.tools import search_products
 from backend.services.websocket_manager import get_ws_manager
-from backend.services.sync_database import fetch_one_sync
+from backend.services.sync_database import fetch_one_sync, fetch_all_sync
 from backend.services.token_tracker import start_tracking, get_summary
 from backend.services.input_sanitizer import validate_order_output
 
 ORDER_ID_PLACEHOLDER = "pending"
+
+USUAL_PHRASES = (
+    "the usual",
+    "usual",
+    "my usual",
+    "same as usual",
+    "the usual please",
+    "usual order",
+    "my regular order",
+    "regular order",
+    "reorder last",
+    "last order",
+    "same as last time",
+    "last time",
+    "repeat last order",
+    "same order",
+)
+
+
+def _normalized_message_is_usual(raw_message: str) -> bool:
+    if not raw_message or not isinstance(raw_message, str):
+        return False
+    normalized = raw_message.strip().lower()
+    return any(phrase in normalized for phrase in USUAL_PHRASES)
+
+
+def _build_usual_or_last_order_items(customer_id: str) -> tuple[list[dict], float, str] | None:
+    """If customer has 'usual' or last order, return (order_items, total_amount, parsing_notes). Else None."""
+    try:
+        usual_raw = get_usual_order(customer_id=customer_id)
+        usual_data = json.loads(usual_raw) if isinstance(usual_raw, str) else usual_raw
+        items = usual_data.get("items") or []
+        notes = "Usual order"
+        if not items:
+            # Fallback: last order's items
+            row = fetch_one_sync(
+                "SELECT order_id FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 1",
+                customer_id,
+            )
+            if not row:
+                return None
+            rows = fetch_all_sync(
+                """SELECT oi.sku_id, oi.quantity, oi.unit_price, oi.line_total
+                   FROM order_items oi WHERE oi.order_id = $1""",
+                row["order_id"],
+            )
+            if not rows:
+                return None
+            # Use last order's line items directly (unit_price from order_items so we don't drop inactive products)
+            order_items = []
+            total_amount = 0.0
+            for r in rows:
+                sku_id = (r.get("sku_id") or "").strip()
+                if not sku_id:
+                    continue
+                qty = float(r.get("quantity") or 0)
+                if qty <= 0:
+                    continue
+                unit_price = float(r.get("unit_price") or 0)
+                line_total = float(r.get("line_total") or 0) if r.get("line_total") is not None else round(qty * unit_price, 2)
+                total_amount += line_total
+                name_row = fetch_one_sync("SELECT name FROM products WHERE sku_id = $1", sku_id)
+                order_items.append({
+                    "sku_id": sku_id,
+                    "product_name": (name_row["name"] if name_row else sku_id),
+                    "quantity": qty,
+                    "unit_price": unit_price,
+                    "line_total": line_total,
+                    "confidence": 0.95,
+                })
+            if not order_items:
+                return None
+            return (order_items, round(total_amount, 2), "Last order (no usual pattern yet)")
+        order_items = []
+        total_amount = 0.0
+        for it in items:
+            sku_id = (it.get("sku_id") or "").strip()
+            if not sku_id:
+                continue
+            qty = float(it.get("median_quantity") or it.get("quantity") or 0)
+            if qty <= 0:
+                continue
+            prod = fetch_one_sync("SELECT name, unit_price FROM products WHERE sku_id = $1 AND status = 'active'", sku_id)
+            if not prod:
+                continue
+            unit_price = float(prod["unit_price"] or 0)
+            line_total = round(qty * unit_price, 2)
+            total_amount += line_total
+            order_items.append({
+                "sku_id": sku_id,
+                "product_name": (prod.get("name") or sku_id),
+                "quantity": qty,
+                "unit_price": unit_price,
+                "line_total": line_total,
+                "confidence": 0.95,
+            })
+        if not order_items:
+            return None
+        return (order_items, round(total_amount, 2), notes)
+    except Exception:
+        return None
+
+
+def _build_free_text_order_items(raw_message: str, customer_id: str) -> tuple[list[dict], float, str] | None:
+    """
+    When Converse returns 0 items or an error, try to resolve at least one product from free text:
+    use the message (or a product-like substring) as search_products query and take the top hit.
+    """
+    if not raw_message or not isinstance(raw_message, str):
+        return None
+    text = raw_message.strip()
+    if len(text) < 2:
+        return None
+    # Extract quantity from start (e.g. "2 cases salmon" -> 2)
+    quantity = 1.0
+    num_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:cases?|lbs?|lb|pounds?|x|\*)?", text, re.IGNORECASE)
+    if num_match:
+        quantity = max(1.0, float(num_match.group(1)))
+
+    def try_query(query: str) -> tuple[list[dict], float, str] | None:
+        if not query or len(query) < 2:
+            return None
+        try:
+            result_json = search_products(query=query[:120], top_k=3)
+            results = json.loads(result_json) if isinstance(result_json, str) else result_json
+            if not results or not isinstance(results, list):
+                return None
+            best = results[0]
+            sku_id = (best.get("sku_id") or "").strip()
+            if not sku_id:
+                return None
+            sim = float(best.get("similarity_score") or 0)
+            if sim < 0.25:
+                return None
+            unit_price = float(best.get("unit_price") or 0)
+            product_name = best.get("name") or sku_id
+            line_total = round(quantity * unit_price, 2)
+            order_items = [
+                {
+                    "sku_id": sku_id,
+                    "product_name": product_name,
+                    "quantity": quantity,
+                    "unit_price": unit_price,
+                    "line_total": line_total,
+                    "confidence": round(sim, 2),
+                }
+            ]
+            return (order_items, line_total, "Parsed from free text (fallback)")
+        except Exception:
+            return None
+
+    # Try full message first, then product-only (strip leading numbers and unit words)
+    out = try_query(text)
+    if out is not None:
+        return out
+    product_part = re.sub(r"^\s*\d+(?:\.\d+)?\s*(?:cases?|lbs?|lb|pounds?|x|\*)\s*", "", text, flags=re.IGNORECASE).strip()
+    if product_part and product_part != text:
+        out = try_query(product_part)
+        if out is not None:
+            return out
+    return None
 
 
 def _broadcast(order_id: str, agent_name: str, status: str, summary: str, duration_ms: int | None = None):
@@ -59,43 +226,75 @@ def run_orchestrator(
     _broadcast(order_id, "orchestrator", "started", "Processing order", None)
     start_total = time.perf_counter()
 
-    # --- Step 1: Parse order ---
+    # --- Fast path: "the usual" / "last order" ---
+    parse_result = None
+    if _normalized_message_is_usual(raw_message):
+        built = _build_usual_or_last_order_items(customer_id)
+        if built:
+            order_items_built, total_amount_built, parsing_notes = built
+            parse_result = {
+                "customer_id": customer_id,
+                "order_items": order_items_built,
+                "total_amount": total_amount_built,
+                "items_needing_review": [],
+                "parsing_notes": parsing_notes,
+            }
+
+    # --- Step 1: Parse order (unless fast path filled parse_result) ---
     t0 = time.perf_counter()
     _broadcast(order_id, "order_intake", "started", "Parsing order", None)
-    try:
-        parse_result = parse_order(raw_message, customer_id)
-    except Exception as e:
-        _broadcast(order_id, "order_intake", "failed", str(e), int((time.perf_counter() - t0) * 1000))
-        summary = {
-            "order_id": "",
-            "status": "needs_review",
-            "customer_name": customer_name,
-            "channel": channel or "web",
-            "item_count": 0,
-            "total_amount": 0,
-            "items_confirmed": 0,
-            "items_needing_review": 0,
-            "substitutions_made": 0,
-            "purchase_orders_generated": 0,
-            "confirmation_sent": False,
-        }
-        return None, summary
+    if parse_result is None:
+        try:
+            parse_result = parse_order(raw_message, customer_id)
+        except Exception as e:
+            _broadcast(order_id, "order_intake", "failed", str(e), int((time.perf_counter() - t0) * 1000))
+            summary = {
+                "order_id": "",
+                "status": "needs_review",
+                "customer_name": customer_name,
+                "channel": channel or "web",
+                "item_count": 0,
+                "total_amount": 0,
+                "items_confirmed": 0,
+                "items_needing_review": 0,
+                "substitutions_made": 0,
+                "purchase_orders_generated": 0,
+                "confirmation_sent": False,
+                "parsed_items": [],
+                "message": "Order processing failed. Please try again or contact your sales rep.",
+            }
+            return None, summary
     if isinstance(parse_result, dict) and parse_result.get("error"):
-        _broadcast(order_id, "order_intake", "failed", parse_result.get("error", "Parse failed"), int((time.perf_counter() - t0) * 1000))
-        summary = {
-            "order_id": "",
-            "status": "needs_review",
-            "customer_name": customer_name,
-            "channel": channel or "web",
-            "item_count": 0,
-            "total_amount": float(parse_result.get("total_amount", 0) or 0),
-            "items_confirmed": 0,
-            "items_needing_review": 0,
-            "substitutions_made": 0,
-            "purchase_orders_generated": 0,
-            "confirmation_sent": False,
-        }
-        return None, summary
+        # Try free-text fallback before giving up: often Converse fails but the message is clear (e.g. "2 cases salmon").
+        built = _build_free_text_order_items(raw_message, customer_id)
+        if built:
+            order_items_built, total_amount_built, parsing_notes = built
+            parse_result = {
+                "customer_id": customer_id,
+                "order_items": order_items_built,
+                "total_amount": total_amount_built,
+                "items_needing_review": [],
+                "parsing_notes": parsing_notes,
+            }
+            logger.info("order_writer: parse had error, used free-text fallback, now %s items", len(order_items_built))
+        else:
+            _broadcast(order_id, "order_intake", "failed", parse_result.get("error", "Parse failed"), int((time.perf_counter() - t0) * 1000))
+            summary = {
+                "order_id": "",
+                "status": "needs_review",
+                "customer_name": customer_name,
+                "channel": channel or "web",
+                "item_count": 0,
+                "total_amount": float(parse_result.get("total_amount", 0) or 0),
+                "items_confirmed": 0,
+                "items_needing_review": 0,
+                "substitutions_made": 0,
+                "purchase_orders_generated": 0,
+                "confirmation_sent": False,
+                "parsed_items": [],
+                "message": "We couldn't parse your order. Please list the items you need or try 'Reorder last order'.",
+            }
+            return None, summary
     valid, security_note = validate_order_output(parse_result, customer_id)
     if not valid:
         _broadcast(order_id, "order_intake", "failed", security_note or "Output validation failed", int((time.perf_counter() - t0) * 1000))
@@ -112,12 +311,49 @@ def run_orchestrator(
             "purchase_orders_generated": 0,
             "confirmation_sent": False,
             "security_note": security_note or "Output validation failed",
+            "parsed_items": [],
+            "message": security_note or "Order validation failed. Please check and try again.",
         }
         return None, summary
     _broadcast(order_id, "order_intake", "completed", "Parsed", int((time.perf_counter() - t0) * 1000))
 
     order_items = parse_result.get("order_items") or []
+    logger.info(
+        "order_writer: parse_result order_items_count=%s has_error=%s parsing_notes=%s",
+        len(order_items),
+        bool(parse_result.get("error")),
+        (parse_result.get("parsing_notes") or "")[:200],
+    )
     total_amount = float(parse_result.get("total_amount") or 0)
+    # Fallback: if parse returned 0 items but message suggests "usual" or "last order", try usual/last
+    if not order_items and _normalized_message_is_usual(raw_message):
+        built = _build_usual_or_last_order_items(customer_id)
+        if built:
+            order_items_built, total_amount_built, parsing_notes = built
+            parse_result = {
+                "customer_id": customer_id,
+                "order_items": order_items_built,
+                "total_amount": total_amount_built,
+                "items_needing_review": [],
+                "parsing_notes": f"{parse_result.get('parsing_notes') or ''}; {parsing_notes}".strip("; "),
+            }
+            order_items = order_items_built
+            total_amount = total_amount_built
+            logger.info("order_writer: used usual/last fallback after parse returned 0 items, now %s items", len(order_items))
+    if not order_items:
+        built = _build_free_text_order_items(raw_message, customer_id)
+        if built:
+            order_items_built, total_amount_built, parsing_notes = built
+            parse_result = {
+                "customer_id": customer_id,
+                "order_items": order_items_built,
+                "total_amount": total_amount_built,
+                "items_needing_review": [],
+                "parsing_notes": f"{parse_result.get('parsing_notes') or ''}; {parsing_notes}".strip("; "),
+            }
+            order_items = order_items_built
+            total_amount = total_amount_built
+            logger.info("order_writer: used free-text fallback, now %s items", len(order_items))
     order_items_json = json.dumps(order_items, default=str)
 
     # --- Step 2: Check inventory ---
@@ -186,9 +422,38 @@ def run_orchestrator(
         "agent_trace": agent_trace,
     }
     t3 = time.perf_counter()
+    num_parsed = len(order_items)
+    num_checked = len(checked_items)
     _broadcast(order_id, "order_writer", "started", "Saving order", None)
+    logger.info(
+        "order_writer: parsed_items=%s checked_items=%s inv_summary=%s",
+        num_parsed, num_checked, inv_summary,
+    )
     if not checked_items:
-        _broadcast(ORDER_ID_PLACEHOLDER, "order_writer", "failed", "No items to save; skipping order", int((time.perf_counter() - t3) * 1000))
+        if num_parsed == 0:
+            skip_reason = "Parse returned 0 items (no line items could be identified from the message)."
+            if _normalized_message_is_usual(raw_message):
+                user_message = (
+                    "We don't have a usual or last order on file for you yet. "
+                    "Please list the items you need (e.g. '2 cases salmon, 1 flat strawberries')."
+                )
+            else:
+                user_message = (
+                    "We couldn't identify any items in your order. "
+                    "Please list the items you need (e.g. product names and quantities), or try 'Reorder last order' to repeat your previous order."
+                )
+        else:
+            skip_reason = f"Parse returned {num_parsed} item(s) but inventory check produced 0 items to save (e.g. all out of stock with no substitutions)."
+            user_message = (
+                "Your items couldn't be fulfilled from current stock (out of stock or unavailable). "
+                "Your sales rep can suggest alternatives or restock dates."
+            )
+        logger.warning(
+            "order_writer: skipping order — %s customer_id=%s raw_message_len=%s",
+            skip_reason, customer_id, len(raw_message or ""),
+        )
+        broadcast_summary = f"No items to save: {skip_reason}"
+        _broadcast(ORDER_ID_PLACEHOLDER, "order_writer", "failed", broadcast_summary, int((time.perf_counter() - t3) * 1000))
         summary = {
             "order_id": "",
             "status": "needs_review",
@@ -202,6 +467,7 @@ def run_orchestrator(
             "purchase_orders_generated": purchase_orders_generated,
             "confirmation_sent": False,
             "parsed_items": [],
+            "message": user_message,
         }
         return None, summary
     try:

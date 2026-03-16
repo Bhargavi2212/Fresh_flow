@@ -73,10 +73,12 @@ def save_confirmed_order(order_data: str) -> str:
     try:
         data = json.loads(order_data) if isinstance(order_data, str) else order_data
     except (json.JSONDecodeError, TypeError):
+        logger.warning("order_writer: invalid order_data (not valid JSON)")
         return json.dumps({"error": "order_data must be a valid JSON string", "order_id": None, "status": None})
 
     customer_id = (data.get("customer_id") or "").strip()
     if not customer_id:
+        logger.warning("order_writer: missing customer_id")
         return json.dumps({"error": "customer_id required", "order_id": None, "status": None})
 
     channel = (data.get("channel") or "web").strip()
@@ -91,6 +93,11 @@ def save_confirmed_order(order_data: str) -> str:
     items = data.get("items") or data.get("order_items") or []
     if not isinstance(items, list):
         items = []
+
+    logger.info("order_writer: saving order customer_id=%s item_count=%s", customer_id, len(items))
+    if not items:
+        logger.warning("order_writer: refusing to save order with 0 items customer_id=%s", customer_id)
+        return json.dumps({"error": "No items to save", "order_id": None, "status": None})
 
     total_amount = 0.0
     for it in items:
@@ -125,6 +132,7 @@ def save_confirmed_order(order_data: str) -> str:
         total_amount,
         trace_str,
     )
+    logger.info("order_writer: saved order_id=%s customer_id=%s item_count=%s total_amount=%s", order_id, customer_id, len(items), total_amount)
 
     for it in items:
         sku_id = (it.get("sku_id") or it.get("skuId") or "").strip()

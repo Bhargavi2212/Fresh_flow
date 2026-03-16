@@ -145,10 +145,10 @@ async def ingest_web(body: IngestWebRequest):
                 body.channel,
                 customer_phone="",
             ),
-            timeout=14.0,
+            timeout=60.0,
         )
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Order processing timed out (15s). Please retry.")
+        raise HTTPException(status_code=504, detail="Order processing timed out (60s). Please retry.")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Orchestrator failed: {e}") from e
 
@@ -181,6 +181,8 @@ async def ingest_web(body: IngestWebRequest):
             inv = trace.get("inventory") or {}
             procurement_signals = inv.get("procurement_signals") or inv.get("procurementSignals") or []
 
+    message = summary.get("message")
+
     return IngestWebResponse(
         order_id=order_id,
         status=status,
@@ -189,4 +191,5 @@ async def ingest_web(body: IngestWebRequest):
         customer_insights=[],
         total_amount=total_amount,
         confidence_score=float(confidence_score),
+        message=message,
     )

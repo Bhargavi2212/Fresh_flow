@@ -20,13 +20,14 @@ MAX_CONVERSE_ROUNDS = 15
 SYSTEM_PROMPT = """You are an order parsing specialist for FreshFlow (seafood and produce distributor). Convert raw order messages into structured line items matched to real products.
 
 RULES:
-- For every product mention, use the search_products tool to find matching SKUs. Never guess a SKU.
+- You MUST call search_products for every product or ingredient mentioned (e.g. "salmon", "2 cases salmon", "shrimp", "lettuce"). Never output order_items without having called search_products first for each product.
 - If the customer says "the usual" or "same as last time", call get_usual_order(customer_id) and use those items with confidence 0.95.
 - Use get_customer_preferences for vague requests; use get_customer_history when helpful.
 - Handle corrections (e.g. "3 cases — actually 5" → quantity 5).
 - Convert units to SKU units (e.g. 20 lbs when SKU is 10lb case → quantity 2).
 - Ground confidence in search_products similarity_score: >=0.85 use as-is; 0.70-0.85 subtract 0.05; <0.70 use 0.50 and add to items_needing_review.
-- Your final response must be a single JSON object with keys: customer_id, order_items, total_amount, items_needing_review, parsing_notes. Use double quotes for all keys and strings."""
+- Your final response must be a single JSON object with keys: customer_id, order_items, total_amount, items_needing_review, parsing_notes. Use double quotes for all keys and strings.
+- order_items must be an array of objects with: sku_id, product_name, quantity, unit_price, line_total (and optionally confidence). Never return an empty order_items when the message clearly mentions products."""
 
 # Bedrock Converse tool definitions (toolSpec with inputSchema as JSON schema).
 def _tool_specs() -> list[dict]:
@@ -145,7 +146,7 @@ def parse_order(raw_text: str, customer_id: str) -> dict:
     """
     client = _get_client()
     messages: list[dict] = [
-        {"role": "user", "content": [{"text": f'Parse this order from customer {customer_id}:\n\n"{raw_text}"\n\nUse tools for every product; then output a single JSON object with keys customer_id, order_items, total_amount, items_needing_review, parsing_notes. Use double quotes only.'}]}
+        {"role": "user", "content": [{"text": f'Parse this order from customer {customer_id}:\n\n"{raw_text}"\n\nYou MUST call search_products for each product or ingredient in the message (e.g. salmon, shrimp, cases of X) before replying. Then output exactly one JSON object with keys: customer_id, order_items, total_amount, items_needing_review, parsing_notes. order_items must list each item with sku_id, product_name, quantity, unit_price, line_total. Use double quotes only.'}]}
     ]
     inference_config = {"maxTokens": 4096, "temperature": 0}
     request_kwargs: dict[str, Any] = {
@@ -211,6 +212,12 @@ def parse_order(raw_text: str, customer_id: str) -> dict:
                     text,
                     ["customer_id", "order_items", "total_amount", "items_needing_review", "parsing_notes"],
                     "parse_order",
+                )
+                order_items = obj.get("order_items") or []
+                logger.info(
+                    "order_intake_converse: final parse order_items_count=%s keys=%s",
+                    len(order_items),
+                    list(obj.keys()) if isinstance(obj, dict) else None,
                 )
             except ValueError as e:
                 return {"error": str(e), "agent_name": "parse_order"}
